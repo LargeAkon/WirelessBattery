@@ -574,7 +574,9 @@ def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
         pid = info.get("product_id") or 0
         if not path or not vid or is_bluetooth(path):
             continue
-        groups.setdefault((vid, pid, phys_token(path)), []).append(info)
+        # 同一只接收器的鼠标口和厂商电量口，路径最后一段集合号不同。
+        # 去掉集合号才是一只设备，类型才能从标准用法上看出来。
+        groups.setdefault((vid, pid, _instance(path)), []).append(info)
 
     devices: list[Device] = []
     probes = (

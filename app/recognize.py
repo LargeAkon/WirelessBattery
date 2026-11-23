@@ -20,8 +20,8 @@ try:
 except Exception:  # pragma: no cover
     hid = None
 
-from model import Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
-from providers import evision, hidpp, raw_hid
+from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
+from providers import evision, hidpp, oem, raw_hid
 
 LOGITECH_VID = 0x046D
 EVISION_VID = 0x320F
@@ -120,6 +120,8 @@ _MOUSE_KEYS = ("mouse", "superlight", "pro x", "鼠标", "g pro", "gpx", "mx mas
 _KEY_KEYS = ("keyboard", "keychron", "kbd", "键盘", "rainy", "keys")
 _HEAD_KEYS = ("headset", "headphone", "earbud", "耳机", "耳麦", "cloud", "飓风",
               "zone ", "g733", "g pro x wireless")
+_PAD_KEYS = ("controller", "gamepad", "joystick", "手柄", "vader", "dualsense",
+             "dualshock", "8bitdo")
 
 
 def kind_from(info: dict, name: str) -> str:
@@ -128,6 +130,10 @@ def kind_from(info: dict, name: str) -> str:
     use = info.get("usage") or 0
     if any(k in n for k in _HEAD_KEYS):
         return HEADSET
+    if page == 0x0001 and use in (0x0004, 0x0005):
+        return GAMEPAD
+    if any(k in n for k in _PAD_KEYS):
+        return GAMEPAD
     if page == 0x0001 and use == 0x0002:
         return MOUSE
     if page == 0x0001 and use == 0x0006:
@@ -192,7 +198,15 @@ def recognize(text: str) -> dict:
                     d.kind = kind
                 return _from_device(d, info)
 
-    # 3) 其他品牌：被动监听，找稳定字节
+    # 3) 其余 2.4G 方案：Compx、0x83、赛睿、飞智等，对得上才算识别到
+    devices = oem.scan_oem(debug, force=True)
+    for d in devices:
+        if d.vid_pid == f"{info['vendor_id']:04X}:{info['product_id']:04X}":
+            if d.kind == UNKNOWN and kind != UNKNOWN:
+                d.kind = kind
+            return _from_device(d, info)
+
+    # 4) 其他品牌：被动监听，找稳定字节
     path = info.get("path")
     if not path:
         return {"ok": False, "message": "端点没有可用路径，无法监听。"}

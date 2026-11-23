@@ -18,7 +18,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
-from model import Device, MOUSE, KEYBOARD, HEADSET, UNKNOWN
+from model import GAMEPAD, Device, MOUSE, KEYBOARD, HEADSET, UNKNOWN
 
 # ---- 设备接口 ----
 BATTERY_GUID = (0x72631E54, 0x78A4, 0x11D0,
@@ -303,6 +303,8 @@ def _hid_index() -> dict[tuple[int, int], tuple[str, str]]:
             hint = KEYBOARD
         elif usage_page == 0x01 and usage == 0x02:
             hint = MOUSE
+        elif usage_page == 0x01 and usage in (0x04, 0x05):
+            hint = GAMEPAD
         elif usage_page == 0x0C:
             hint = HEADSET
         prev_name, prev_hint = out.get(key, ("", ""))
@@ -329,6 +331,8 @@ def _classify(name: str, hint: str) -> str:
     if any(k in low for k in ("headset", "headphone", "earbud", "buds", "耳机",
                               "耳麦", "wh-", "wf-")):
         return HEADSET
+    if any(k in low for k in ("controller", "gamepad", "joystick", "手柄")):
+        return GAMEPAD
     return hint or UNKNOWN
 
 

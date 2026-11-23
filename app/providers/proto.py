@@ -446,3 +446,150 @@ def parse_8bitdo(data: bytes) -> tuple[float, bool] | None:
     if not 1 <= level <= 100:
         return None
     return float(level), bool(raw & 0x80)
+
+
+def nordic54_request(link: int) -> bytes:
+    """ATK Zero 一类 Nordic 54。link 0 是有线，1 是接收器后面的鼠标。"""
+    buf = bytearray(64)
+    buf[0] = 0x08
+    buf[1] = 0x7D
+    buf[2] = 0x72
+    buf[3] = 0x02
+    buf[5] = link & 0xFF
+    buf[6] = 0x07
+    buf[7] = 0x01
+    return bytes(buf)
+
+
+def parse_nordic54(data: bytes) -> float | None:
+    """应答要回显命令 0x72 和子项 0x07，状态 0 才是鼠标自己答的。
+
+    这条查询在无线上不带充电标志，调用方不要自己猜。
+    """
+    layouts = (
+        (1, 2, 5, 7),  # 报告号还在
+        (0, 1, 4, 6),  # 报告号被拿掉
+    )
+    for cmd_at, status_at, echo_at, level_at in layouts:
+        if level_at >= len(data):
+            continue
+        if data[cmd_at] != 0x72 or data[echo_at] != 0x07 or data[status_at] != 0:
+            continue
+        level = data[level_at]
+        if 0 <= level <= 100:
+            return float(level)
+    return None
+
+
+def parse_arctis(data: bytes, direct: bool) -> tuple[float, bool] | None:
+    """Arctis ``b0``。字节 1 为 0x03 表示耳机在线，字节 2 是百分比，字节 3 为 1 表示在充电。
+
+    旧款把 0–4 档放在同一个字节。未知型号只接受 5–100，避免把「满档」读成 4%。
+    """
+    for start in (0, 1):
+        if len(data) < start + 4:
+            continue
+        if data[start] != 0xB0 or data[start + 1] != 0x03:
+            continue
+        level = data[start + 2]
+        charge = data[start + 3]
+        if charge not in (0, 1) or not 0 <= level <= 100:
+            continue
+        if not direct and level <= 4:
+            return None
+        return float(level), charge == 1
+    return None
+
+
+def parse_aerox(data: bytes) -> tuple[float, bool] | None:
+    """Aerox 无线 ``d2``。bit7 是充电，低 7 位 1–21 是 5% 一档，再高就是百分比。0 是休眠。"""
+    for start in (0, 1):
+        if len(data) <= start + 1 or data[start] != 0xD2:
+            continue
+        raw = data[start + 1]
+        if raw == 0:
+            return None
+        charging = bool(raw & 0x80)
+        value = raw & 0x7F
+        if 1 <= value <= 21:
+            return float((value - 1) * 5), charging
+        if 22 <= value <= 100:
+            return float(value), charging
+    return None
+
+
+def parse_rival3(data: bytes) -> tuple[float, bool] | None:
+    """Rival 3 无线。应答回显 ``aa``，电量在下一字节，再往后两字节只能是 0 或 1。"""
+    for start in (0, 1):
+        if len(data) < start + 4 or data[start] != 0xAA:
+            continue
+        level = data[start + 1]
+        charge = data[start + 3]
+        if charge not in (0, 1) or not 1 <= level <= 100:
+            continue
+        return float(level), charge == 1
+    return None
+
+
+def parse_jbl(data: bytes) -> float | None:
+    """Quantum 接收器自己推的报告 0x08，电量在第 1 字节。没有充电位。"""
+    if len(data) < 2 or data[0] != 0x08:
+        return None
+    level = data[1]
+    if not 1 <= level <= 100:
+        return None
+    return float(level)
+
+
+def flydigi_request(report_id: int) -> bytes:
+    """Vader 5 Pro 的 GET_INFO。33 字节里前 6 字节是报告号和 ``5A A5 01 02 03``。"""
+    buf = bytearray(33)
+    buf[0] = report_id & 0xFF
+    buf[1] = 0x5A
+    buf[2] = 0xA5
+    buf[3] = 0x01
+    buf[4] = 0x02
+    buf[5] = 0x03
+    return bytes(buf)
+
+
+def parse_flydigi(data: bytes) -> tuple[float, bool] | None:
+    """只认 GET_INFO 应答。摇杆报告也以 5A A5 开头，但第 3 字节不是 0x01。
+
+    电量字节的高 4 位是状态（0 放电，1 充电，2 充满），低 4 位是 0–5 档。
+    """
+    limit = min(4, len(data) - 11)
+    for start in range(0, max(0, limit)):
+        if data[start] != 0x5A or data[start + 1] != 0xA5 or data[start + 2] != 0x01:
+            continue
+        raw = data[start + 11]
+        status = (raw >> 4) & 0x0F
+        level = raw & 0x0F
+        if level > 5 or status > 2:
+            continue
+        if status == 2:
+            return 100.0, True
+        return float(level * 20), status == 1
+    return None
+
+
+def mchose_g7_request() -> bytes:
+    buf = bytearray(65)
+    payload = bytes([0x00, 0x55, 0x30, 0xA5, 0x0B, 0x2E, 0x01, 0x01, 0x01])
+    buf[:len(payload)] = payload
+    return bytes(buf)
+
+
+def parse_mchose_g7(data: bytes) -> tuple[float, bool] | None:
+    """迈从 G7。``AA 30`` 后面第 8 字节是百分比，第 9 字节 1 表示在充电。"""
+    for start in (0, 1):
+        if len(data) < start + 10:
+            continue
+        if data[start] != 0xAA or data[start + 1] != 0x30:
+            continue
+        level = data[start + 8]
+        charge = data[start + 9]
+        if not 0 <= level <= 100 or charge not in (0, 1):
+            continue
+        return float(level), charge == 1
+    return None

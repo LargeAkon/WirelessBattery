@@ -10,7 +10,7 @@ import ctypes
 import re
 from ctypes import wintypes
 
-from model import Device, MOUSE, KEYBOARD, HEADSET, UNKNOWN
+from model import GAMEPAD, Device, MOUSE, KEYBOARD, HEADSET, UNKNOWN
 
 BATTERY_FMTID = (0x104EA319, 0x6EE2, 0x4701, (0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5))
 BATTERY_PIDS = {2, 3, 4}
@@ -147,6 +147,8 @@ def _classify(name: str, cls: str) -> str:
     if any(k in n for k in ("headset", "headphone", "buds", "earbud", "airpods",
                             "wh-", "wf-", "耳机", "耳麦")):
         return HEADSET
+    if any(k in n for k in ("controller", "gamepad", "joystick", "手柄")):
+        return GAMEPAD
     if c == "audioendpoint":
         return HEADSET
     return UNKNOWN

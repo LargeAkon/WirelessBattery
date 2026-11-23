@@ -132,7 +132,8 @@ class ScreenBlur:
         self.image = None
 
     def capture(self, screen: QScreen | None, region: QRect | None = None,
-                downscale: int | None = None, blur: float | None = None) -> bool:
+                downscale: int | None = None, blur: float | None = None,
+                margin: int = 32) -> bool:
         self.release()
         if screen is None or QApplication.instance() is None:
             return False
@@ -141,7 +142,7 @@ class ScreenBlur:
             # 只抓卡片背后那一小块。整屏位图在 2K 上就要二十多兆，
             # 卡片本身不到四百像素宽，用不到那张全屏。
             if region is not None and not region.isNull():
-                grab = region.adjusted(-32, -32, 32, 32).intersected(geo)
+                grab = region.adjusted(-margin, -margin, margin, margin).intersected(geo)
             else:
                 grab = geo
             if grab.isEmpty():

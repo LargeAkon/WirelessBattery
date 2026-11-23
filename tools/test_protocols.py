@@ -139,6 +139,41 @@ def test_hyperx() -> None:
     _check("kingston", proto.parse_hyperx_kingston_battery(kingston) == 55.0)
 
 
+def test_brand_frames() -> None:
+    n54 = bytes([0x08, 0x72, 0x00, 0x3A, 0x00, 0x07, 0x01, 100, 0x16, 0x11])
+    _check("nordic54", proto.parse_nordic54(n54) == 100.0)
+    asleep = bytearray(n54)
+    asleep[2] = 0x01
+    _check("nordic54 asleep", proto.parse_nordic54(bytes(asleep)) is None)
+    _check("arctis gen2", proto.parse_arctis(bytes([0xB0, 0x03, 88, 0x01]), True) == (88.0, True))
+    _check("arctis low ambiguous", proto.parse_arctis(bytes([0xB0, 0x03, 4, 0x00]), False) is None)
+    _check("arctis low known", proto.parse_arctis(bytes([0xB0, 0x03, 4, 0x00]), True) == (4.0, False))
+    _check("aerox", proto.parse_aerox(bytes([0xD2, 0x04])) == (15.0, False))
+    _check("aerox charge", proto.parse_aerox(bytes([0xD2, 0x84])) == (15.0, True))
+    _check("aerox asleep", proto.parse_aerox(bytes([0xD2, 0x00])) is None)
+    _check("rival3", proto.parse_rival3(bytes([0xAA, 42, 0x00, 0x01])) == (42.0, True))
+    _check("jbl", proto.parse_jbl(bytes([0x08, 95])) == 95.0)
+    info = bytearray(12)
+    info[0] = 0x5A
+    info[1] = 0xA5
+    info[2] = 0x01
+    info[11] = 0x05
+    _check("flydigi", proto.parse_flydigi(bytes(info)) == (100.0, False))
+    info[11] = 0x15
+    _check("flydigi charge", proto.parse_flydigi(bytes(info)) == (100.0, True))
+    stick = bytearray(info)
+    stick[2] = 0xEF
+    stick[11] = 0x05
+    _check("flydigi ignore sticks", proto.parse_flydigi(bytes(stick)) is None)
+    g7 = bytes([0xAA, 0x30, 0xA5, 0x0B, 0x0A, 0x01, 0x01, 0x01, 0x2E, 0x00])
+    _check("mchose g7", proto.parse_mchose_g7(g7) == (46.0, False))
+    from brands import ARCTIS_DIRECT, FEATURE83, describe
+    _check("lamzu vid", 0x373E in FEATURE83)
+    _check("arctis pid", 0x22A1 in ARCTIS_DIRECT)
+    text = describe(0x3554) or ""
+    _check("compx brands", "Pulsar" in text and "达尔优" in text)
+
+
 def test_descriptor() -> None:
     desc = bytes([
         0x05, 0x06, 0x09, 0x20, 0x15, 0x00, 0x25, 0x64,
@@ -180,6 +215,7 @@ if __name__ == "__main__":
     test_razer()
     test_others()
     test_hyperx()
+    test_brand_frames()
     test_descriptor()
     test_merge()
     print("ALL OK")

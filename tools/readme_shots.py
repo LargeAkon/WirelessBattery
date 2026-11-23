@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import theme  # noqa: E402
 from config import Config  # noqa: E402
-from model import Device, HEADSET, KEYBOARD, MOUSE  # noqa: E402
+from model import Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE  # noqa: E402
 from ui import icons  # noqa: E402
 from ui.card import CardWindow  # noqa: E402
 from ui.diag import DiagWindow  # noqa: E402
@@ -34,7 +34,9 @@ SAMPLE = [
            source="HID++", transport="2.4G 接收器", charging=True),
     Device(key="b", name="VGN VXE75 V2", kind=KEYBOARD, level=100,
            source="Evision", transport="2.4G 接收器"),
-    Device(key="c", name="Cloud III Wireless", kind=HEADSET, level=12,
+    Device(key="c", name="无线手柄 1", kind=GAMEPAD, level=60,
+           source="手柄电量", transport="2.4G 接收器"),
+    Device(key="d", name="Cloud III Wireless", kind=HEADSET, level=12,
            source="HyperX", transport="2.4G 接收器"),
 ]
 

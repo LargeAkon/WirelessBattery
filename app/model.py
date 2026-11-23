@@ -8,12 +8,14 @@ from dataclasses import dataclass, field
 MOUSE = "mouse"
 KEYBOARD = "keyboard"
 HEADSET = "headset"
+GAMEPAD = "gamepad"
 UNKNOWN = "unknown"
 
 TYPE_LABEL = {
     MOUSE: "无线鼠标",
     KEYBOARD: "无线键盘",
     HEADSET: "无线耳机",
+    GAMEPAD: "无线手柄",
     UNKNOWN: "无线外设",
 }
 
@@ -24,7 +26,7 @@ class Device:
 
     key       : 稳定标识，用于记住用户偏好与去重
     name      : 显示名
-    kind      : mouse / keyboard / headset / unknown
+    kind      : mouse / keyboard / headset / gamepad / unknown
     level     : 0-100，None 表示未知
     charging  : 是否在充电
     source    : 探测通道来源，用于诊断
@@ -80,7 +82,7 @@ class Device:
         return " · ".join(parts)
 
     def sort_key(self):
-        order = {MOUSE: 0, KEYBOARD: 1, HEADSET: 2, UNKNOWN: 3}
+        order = {MOUSE: 0, KEYBOARD: 1, HEADSET: 2, GAMEPAD: 3, UNKNOWN: 4}
         return (order.get(self.kind, 3), self.name)
 
     def signature(self) -> tuple:

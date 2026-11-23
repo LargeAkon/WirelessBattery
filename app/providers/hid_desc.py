@@ -16,7 +16,7 @@ try:
 except Exception:  # pragma: no cover
     hid = None
 
-from model import Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
+from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
 
@@ -242,6 +242,9 @@ def _kind_of(usages: set[tuple[int, int]], name: str) -> str:
     low = (name or "").lower()
     if any(k in low for k in ("headset", "headphone", "earbud", "耳机", "耳麦")):
         return HEADSET
+    if ((0x01, 0x05) in usages or (0x01, 0x04) in usages
+            or any(k in low for k in ("controller", "gamepad", "手柄"))):
+        return GAMEPAD
     if (0x01, 0x02) in usages or "mouse" in low or "鼠标" in low:
         return MOUSE
     if (0x01, 0x06) in usages or "keyboard" in low or "键盘" in low:

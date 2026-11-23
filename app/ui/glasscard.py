@@ -31,12 +31,11 @@ from ui.glass import ScreenBlur
 RADIUS = 20.0
 
 # ---- 浅色材质（可调参数集中在这里）----
-LIGHT_VEIL = 0.48        # 霜化层基础不透明度（亮背景用这个值）
-LIGHT_VEIL_DARK_ADD = 0.22  # 底图越暗，霜化层额外加厚多少（苹果材质就是这么自适应的）
+LIGHT_VEIL = 0.84        # 霜化层基础不透明度。再薄的话，背后窗口会剩一块矩形
+LIGHT_VEIL_DARK_ADD = 0.08  # 底图越暗，霜化层额外加厚多少
 LIGHT_TOP = 0.18         # 顶部额外白，形成上亮下暗的厚度
 LIGHT_FOOT = 18          # 底部一点冷灰，压出"玻璃有厚度"的收口
 LIGHT_SHEEN = 40         # 对角柔光
-LIGHT_INNER = 14         # 内壁阴影
 LIGHT_GRAIN = 0.24       # 颗粒强度（磨砂手感，太轻就成了塑料板）
 
 # ---- 深色材质 ----
@@ -158,25 +157,22 @@ class GlassCard(QWidget):
             p.setBrush(sheen)
             p.drawRect(self.rect())
 
-            # 4) 内壁阴影：沿边缘一圈极淡的暗，玻璃的"厚度"就在这一圈
-            inner = QPainterPath()
-            inner.addRoundedRect(body.adjusted(8, 8, -8, -8),
-                                 max(2.0, RADIUS - 8), max(2.0, RADIUS - 8))
-            stroker = QPainterPathStroker()
-            stroker.setWidth(22.0)
-            band = stroker.createStroke(inner).intersected(path)
-            shade = QLinearGradient(0, 0, 0, self.height())
+            # 4) 内壁阴影。只在深色画这一圈：浅色卡片又矮又宽，
+            #    描边环的内沿会剩一块发灰的长方形，看起来像透出了背后的窗口。
             if dark:
+                inner = QPainterPath()
+                inner.addRoundedRect(body.adjusted(8, 8, -8, -8),
+                                     max(2.0, RADIUS - 8), max(2.0, RADIUS - 8))
+                stroker = QPainterPathStroker()
+                stroker.setWidth(22.0)
+                band = stroker.createStroke(inner).intersected(path)
+                shade = QLinearGradient(0, 0, 0, self.height())
                 shade.setColorAt(0.0, QColor(255, 255, 255, 14))
                 shade.setColorAt(0.55, QColor(0, 0, 0, int(DARK_INNER * 0.6)))
                 shade.setColorAt(1.0, QColor(0, 0, 0, int(DARK_INNER * 0.9)))
-            else:
-                shade.setColorAt(0.0, QColor(120, 128, 142, int(LIGHT_INNER * 0.35)))
-                shade.setColorAt(0.55, QColor(96, 104, 120, int(LIGHT_INNER * 0.55)))
-                shade.setColorAt(1.0, QColor(72, 80, 96, LIGHT_INNER))
-            p.setPen(Qt.NoPen)
-            p.setBrush(shade)
-            p.drawPath(band)
+                p.setPen(Qt.NoPen)
+                p.setBrush(shade)
+                p.drawPath(band)
 
             # 5) 颗粒：磨砂手感，浅色主题要非常克制，重了就"脏"
             p.setOpacity(DARK_GRAIN if dark else LIGHT_GRAIN)

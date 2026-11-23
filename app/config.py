@@ -9,7 +9,7 @@ from pathlib import Path
 
 APP_NAME = "WirelessBattery"
 # 与 installer/setup.py 的 VERSION 保持一致（诊断报告里会写出来，方便对版本）
-APP_VERSION = "1.5.23"
+APP_VERSION = "1.5.24"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # 刷新间隔只提供三档

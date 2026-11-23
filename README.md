@@ -1,6 +1,6 @@
 # 外设电量 · WirelessBattery
 
-> Windows 托盘小工具：实时显示 2.4G 无线键鼠耳机的电量，充电时托盘图标会「涨满」。
+> Windows 托盘小工具：实时显示 2.4G 无线键鼠、手柄、耳机的电量，充电时托盘图标会「涨满」。
 > A lightweight Windows tray app that shows the battery level of your 2.4 GHz wireless peripherals in real time.
 
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D4)
@@ -50,7 +50,7 @@
 ## 功能
 
 - **托盘常驻**：电池图标内腔的填充长度跟着电量走，插电时左侧绿色逐帧涨满，一眼可见。
-- **多设备同屏**：鼠标、键盘、耳机同时列出，各自独立电量条。
+- **多设备同屏**：鼠标、键盘、手柄、耳机同时列出，各自独立电量条。
 - **设备休眠不消失**：接收器断连时保留上次读数并标注「信号中断」，不会一闪一闪地跳没。
 - **三种刷新档位**：10 / 15 / 20 分钟；检测到充电时自动加密到 30 秒一次。
 - **开机自启**：写 HKCU 注册表，无需管理员权限，卸载时自动清理。
@@ -68,17 +68,23 @@
 | 通道 | 覆盖范围 | 状态 |
 |---|---|---|
 | **HID++ 2.0** | 罗技全系（G Pro / GPW / MX Master / G913 等） | 已实现 |
-| **Evision** | VGN、ATK 全系（`VID 320F`） | 已实现 |
+| **Evision** | ATK、VGN、VXE 键盘与部分鼠标（`VID 320F`） | 已实现 |
 | **HyperX** | HyperX 2.4G 耳机（按产品号匹配） | 已实现 |
-| **Compx** | 中颖 / 万灵公版方案，多家贴牌键鼠共用 | 已实现 |
-| **厂商 0x83 特征报告** | 用 Feature Report 0x83 回电量的公版方案 | 已实现 |
+| **Compx 17 字节** | 页面 `FF02` 的接收器，不看品牌名。ATK / VXE / VGN 鼠标、达尔优、Pulsar、Attack Shark、狼蛛键盘、Ninjutso、因科特、Hitscan、塞洛斯、Finalmouse、赴极等贴牌 | 已实现 |
+| **Nordic 54** | ATK Zero 一类（`VID 373B`，页面 `FF05`） | 已实现 |
+| **厂商 0x83 特征报告** | 万灵花兽、兰族、G-Wolves、迈从，以及中颖公版上的狼蛛、前行者、部分黑爵和多彩 | 已实现 |
+| **迈从 G7** | `VID A8A5` 的 `AA 30` 应答 | 已实现 |
 | **Razer** | 雷蛇（`0x07` / `0x80` 查询帧） | 已实现 |
-| **ASUS** | 华硕 ROG 系（`12 07` 帧） | 已实现 |
+| **ASUS** | 华硕 ROG / TUF（`12 07` / `12 01`） | 已实现 |
 | **Rapoo** | 雷柏（主动上报，被动监听） | 已实现 |
 | **VAXEE** | VAXEE 无线鼠标 | 已实现 |
-| **怒喵 / Ajazz** | 怒喵、黑爵同方案 | 已实现 |
-| **XInput** | Xbox 手柄（四档电量） | 已实现 |
-| **HID 标准电池集合** | 遵守 HID Usage Page 0x06 `Battery Strength` 的设备 | 已实现 |
+| **怒喵 / 黑爵 / Akko** | 同一套状态报告 `0x05`（`VID 3151`） | 已实现 |
+| **赛睿** | Arctis Nova 7 Gen2 的 `b0`、Aerox 的 `d2`、Rival 3 的 `aa` | 已实现 |
+| **JBL** | Quantum 接收器主动上报 | 已实现 |
+| **飞智** | Vader 5 Pro 的 GET_INFO（`VID 37D7`）；旧款多数只有 XInput 四档 | 已实现 |
+| **8BitDo / 索尼** | 八位堂、DualSense、DualShock 的输入报告 | 已实现 |
+| **XInput** | Xbox 手柄，以及走 XInput 的飞智、LEADJOY（四档电量） | 已实现 |
+| **HID 标准电池集合** | 松翰公版上的西伯利亚、iKF、阿斯盾、漫步者 HECATE、前行者等，只要描述符里有 Battery Strength | 已实现 |
 | **Windows 电池类设备** | 系统为其注册了电池设备的外设（只读 IOCTL） | 已实现 |
 | **Windows 设备属性** | 系统能报告 BatteryLevel 属性的设备 | 已实现 |
 | **自定义规则** | 你在诊断窗口里现场识别出的私有格式，自动存成规则 | 已实现 |
@@ -88,7 +94,8 @@
 
 **明确不支持的**：蓝牙设备（本项目只处理 2.4G 与 USB 有线）；
 无电量接口的公版接收器（例如 `258A:1007` 中颖方案，固件里根本没有电量字段）；
-以及尚未实现协议的品牌——这类设备请走下面的「帮我适配」流程。
+任天堂手柄（USB / 蓝牙，不是 2.4G 接收器）；
+Lofree、IPI、EPOS 这类私有帧还没有对过的样本。后一类请走下面的「帮我适配」流程。
 
 ---
 
@@ -139,7 +146,7 @@ python main.py
                     ┌─ Evision ──────── VGN / ATK
                     ├─ HID++ ───────── 罗技
                     ├─ HyperX ──────── HyperX 耳机
-   HID 端点枚举 ────┼─ 芯片组 ───────── Compx / Razer / 华硕 / 雷柏 / VAXEE / 怒喵 / 手柄
+   HID 端点枚举 ────┼─ 芯片组 ───────── Compx / Nordic 54 / 0x83 / 赛睿 / JBL / 飞智 / 手柄
    （一次，共享）    ├─ HID 描述符 ───── 标准 Battery Strength
                     ├─ 系统电池 ─────── GUID_DEVCLASS_BATTERY（只读 IOCTL）
                     ├─ 系统属性 ─────── DEVPKEY 电量属性
@@ -200,12 +207,13 @@ python build.py
 ```
 app/
   main.py            托盘、菜单、刷新调度、充电动画
-  scanner.py         九通道并行调度 + 合并去重 + 失败缓存
+  scanner.py         通道调度 + 合并去重 + 失败缓存
   model.py           Device 数据模型
   config.py          配置持久化（%APPDATA%）与开机自启
   theme.py           配色与样式表
   recognize.py       「复制端点 → 粘贴识别」的解析与探测
-  vendors.py         VID → 无线方案商对照表
+  brands.py          品牌 VID → 走哪套电量帧
+  vendors.py         芯片与系统设备的方案商对照（诊断展示用）
   providers/         各条电量通道，一个文件一套协议
   ui/                卡片窗口、诊断窗口、毛玻璃、图标绘制
 installer/setup.py   安装向导（打包成单文件 Setup.exe）
@@ -221,8 +229,8 @@ tools/               开发期探针与冒烟脚本（不参与打包）
 - **仅 2.4G 与 USB 有线**。蓝牙设备不探测、不显示。
 - **部分设备注定读不到**。厂商没做电量上报、或私有协议未公开且无样本的设备，
   在补协议之前不会有读数。这类情况会明确不显示，而不是显示 `--`。
-- **未实现协议的通道占用时间**。`oem.py` 对每台接收器串行跑 8 个探针，
-  本机没有对应设备时约 2.4 秒，是当前一次刷新（约 2.6 秒）的主要耗时来源。
+- **未实现协议的通道占用时间**。`oem.py` 里 VID 对不上的探针会直接跳过；
+  真正会打开设备的，仍是页面或厂商号对得上的那几条。
 - **不能保证每个品牌都覆盖**。这是按方案商适配的项目，覆盖面随 Issues 里的报告增长。
 
 ---

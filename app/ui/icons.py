@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
-from model import MOUSE, KEYBOARD, HEADSET
+from model import GAMEPAD, MOUSE, KEYBOARD, HEADSET
 
 
 def _pen(color: str, width: float) -> QPen:
@@ -60,6 +60,35 @@ def draw_kind(p: QPainter, kind: str, rect: QRectF, color: str, width: float = 1
         p.drawPath(band)
         p.drawRoundedRect(QRectF(2.2, 12.4, 4.2, 7.4), 2.1, 2.1)
         p.drawRoundedRect(QRectF(17.6, 12.4, 4.2, 7.4), 2.1, 2.1)
+
+    elif kind == GAMEPAD:
+        # 一个圆角矩形 + 十字键，缩到 20px 会读成"带加号的卡片"：手柄真正
+        # 的识别特征是两侧握把向下外张。这里用一条闭合轮廓画出机身与握把
+        # （分开画两个矩形会在内部留下交叉线，小尺寸下糊成一团）。
+        body = QPainterPath()
+        body.moveTo(7.6, 6.6)
+        body.lineTo(16.4, 6.6)
+        body.cubicTo(18.9, 6.6, 20.6, 8.3, 20.9, 10.4)
+        body.cubicTo(21.2, 12.4, 21.5, 16.0, 21.5, 16.9)
+        body.cubicTo(21.5, 18.6, 19.2, 19.0, 18.2, 17.7)
+        body.cubicTo(17.4, 16.6, 16.6, 15.8, 15.0, 15.8)
+        body.lineTo(9.0, 15.8)
+        body.cubicTo(7.4, 15.8, 6.6, 16.6, 5.8, 17.7)
+        body.cubicTo(4.8, 19.0, 2.5, 18.6, 2.5, 16.9)
+        body.cubicTo(2.5, 16.0, 2.8, 12.4, 3.1, 10.4)
+        body.cubicTo(3.4, 8.3, 5.1, 6.6, 7.6, 6.6)
+        body.closeSubpath()
+        p.drawPath(body)
+        # 左十字键
+        p.drawLine(QPointF(8.4, 9.9), QPointF(8.4, 12.5))
+        p.drawLine(QPointF(7.1, 11.2), QPointF(9.7, 11.2))
+        # 右四键：用描边画会在 20px 下互相咬合成一团墨，改填充小圆 + 拉大间距。
+        # 间距 2.1：两个圆之间留 0.9 个网格单位，缩小后仍能看出是四个点。
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        for dx, dy in ((1.05, 0), (0, 1.05), (-1.05, 0), (0, -1.05)):
+            p.drawEllipse(QPointF(15.6 + dx, 11.2 + dy), 0.6, 0.6)
+        p.setBrush(Qt.NoBrush)
 
     else:  # 通用外设
         p.drawRoundedRect(QRectF(3.8, 5.6, 16.4, 12.8), 3.6, 3.6)

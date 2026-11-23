@@ -16,7 +16,7 @@ MAX_MISS = 3  # 连续失败几次后不再显示，避免闪断
 _VENDOR_SOURCES = (
     "HID++", "Evision", "Compx", "Razer", "华硕", "雷柏",
     "VAXEE", "迈从", "厂商", "索尼", "8BitDo", "怒喵", "HID 电量", "手柄电量",
-    "HyperX",
+    "HyperX", "Nordic54", "赛睿", "JBL", "飞智",
 )
 
 
@@ -219,7 +219,8 @@ def _keep_seconds(device: Device) -> float:
         # 罗技设备闲置约 15 分钟进深度休眠，期间完全不应答 HID++。
         # 保留 10 分钟：既覆盖典型休眠，又不至于拔掉后长时间挂着幽灵设备。
         return 600.0
-    if src.startswith(("Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商", "迈从", "HyperX")):
+    if src.startswith(("Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
+                        "迈从", "HyperX", "Nordic54", "赛睿", "JBL", "飞智")):
         return 300.0
     return 180.0
 
@@ -233,7 +234,8 @@ def _score(device: Device) -> int:
     if _is_vendor(device):
         score += 2
     if device.source.startswith(
-            ("HID++", "Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商", "HyperX")):
+            ("HID++", "Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
+             "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "迈从")):
         score += 1
     # 同一只鼠标可能同时被"有线直连"和"接收器"看到（插着线充电、无线也还注册着）。
     # 有线这一路是实时直连，接收器那路可能滞后，合并时优先保留有线读数。

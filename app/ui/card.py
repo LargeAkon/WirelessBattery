@@ -12,8 +12,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
-    QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 import theme
@@ -148,9 +148,11 @@ class CardWindow(QWidget):
         lay.addLayout(block)
 
         self._theme_chips: dict[str, QPushButton] = {}
+        self._theme_group = QButtonGroup(page)
+        self._theme_group.setExclusive(True)
         block, _ = self._chip_block(
             "外观", [(m, theme.MODE_LABEL[m]) for m in theme.MODES],
-            self._pick_theme, self._theme_chips,
+            self._pick_theme, self._theme_chips, group=self._theme_group,
         )
         lay.addLayout(block)
         self._sync_theme_chips()
@@ -175,7 +177,7 @@ class CardWindow(QWidget):
         return page
 
     def _chip_block(self, label_text: str, options, handler, store: dict,
-                    note: str | None = None):
+                    note: str | None = None, group: QButtonGroup | None = None):
         """标题 + （可选的小字备注）+ 选项行。返回 (布局, 备注标签)。"""
         block = QVBoxLayout()
         block.setSpacing(7)
@@ -205,6 +207,8 @@ class CardWindow(QWidget):
             btn.setFixedHeight(28)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.clicked.connect(lambda _=False, v=value: handler(v))
+            if group is not None:
+                group.addButton(btn)
             row.addWidget(btn)
             store[value] = btn
         block.addLayout(row)
@@ -235,6 +239,9 @@ class CardWindow(QWidget):
             btn.setChecked(minutes == current)
 
     def _pick_theme(self, mode: str) -> None:
+        # 外观必须始终有一个选中项。再点当前项时 Qt 会先把按钮取消，
+        # 这里立刻选回去，不能留成深色、浅色都空着。
+        self._sync_theme_chips()
         if mode == theme.current_mode():
             return
         self.config.set("theme", mode)
@@ -287,7 +294,14 @@ class CardWindow(QWidget):
             QGuiApplication.processEvents()
             time.sleep(0.035)
             QGuiApplication.processEvents()
-        ok = self._blur.capture(screen, region)
+        # 浅色霜化薄，背后窗口的矩形边会透出来。多抓一圈、把模糊加大，边才化开。
+        light = theme.current_mode() == "light"
+        ok = self._blur.capture(
+            screen, region,
+            downscale=4 if light else None,
+            blur=11.0 if light else None,
+            margin=80 if light else 32,
+        )
         self.card.attach(self._blur if ok else None)
         if visible:
             self.show()

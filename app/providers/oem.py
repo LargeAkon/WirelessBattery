@@ -3,7 +3,8 @@
 
 同一套只读查询覆盖一整批贴牌：Compx 的 17 字节帧、中颖/万灵那条
 特征报告、雷蛇 0x07/0x80、华硕 12 07、雷柏主动上报、VAXEE、
-八位堂和索尼手柄的标准输入报告。帧对不上就跳过，不显示假电量。
+八位堂和索尼手柄的标准输入报告，再加上 Nordic 54、赛睿、JBL、
+飞智和迈从 G7。帧对不上就跳过，不显示假电量。
 """
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ try:
 except Exception:  # pragma: no cover
     hid = None
 
-from model import Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
+import brands
+from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
 from providers import proto
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
@@ -23,8 +25,6 @@ from providers.hidpath import is_bluetooth, phys_token
 _FAIL: dict[tuple, float] = {}
 _FAIL_FOR = 90.0
 
-_FEATURE83_VIDS = {0x258A, 0x36A7, 0x373E, 0x33E4, 0x37B0, 0x2023}
-_MCHOSE_VIDS = {0x2023, 0x3837, 0x5253, 0xA8A5}
 _SONY_PIDS = {0x0CE6, 0x0DF2, 0x05C4, 0x09CC, 0x0BA0}
 
 
@@ -41,14 +41,18 @@ def _mark_fail(key: tuple) -> None:
 def _kind(members: list[dict], name: str) -> str:
     usages = {(i.get("usage_page") or 0, i.get("usage") or 0) for i in members}
     low = (name or "").lower()
-    if any(k in low for k in ("headset", "headphone", "earbud", "耳机", "耳麦")):
+    if any(k in low for k in ("headset", "headphone", "earbud", "耳机", "耳麦",
+                              "arctis", "quantum", "jbl")):
         return HEADSET
-    if (0x0001, 0x0002) in usages or any(k in low for k in ("mouse", "鼠标")):
+    # 飞智这类接收器会同时挂一个鼠标集合，手柄集合优先。
+    if ((0x0001, 0x0005) in usages or (0x0001, 0x0004) in usages
+            or any(k in low for k in ("controller", "gamepad", "joystick", "手柄",
+                                      "vader", "dualsense", "dualshock"))):
+        return GAMEPAD
+    if (0x0001, 0x0002) in usages or any(k in low for k in ("mouse", "鼠标", "aerox", "rival")):
         return MOUSE
     if (0x0001, 0x0006) in usages or any(k in low for k in ("keyboard", "键盘")):
         return KEYBOARD
-    if any(k in low for k in ("controller", "gamepad", "手柄")):
-        return UNKNOWN
     return UNKNOWN
 
 
@@ -205,7 +209,7 @@ def _try_compx(members, force) -> tuple[float, bool] | None:
 
 
 def _try_feature83(members, vid, force) -> tuple[float, bool] | None:
-    if vid not in _FEATURE83_VIDS and vid not in _MCHOSE_VIDS:
+    if vid not in brands.FEATURE83:
         return None
     targets = [i for i in members if (i.get("usage_page") or 0) >= 0xFF00]
     if not targets:
@@ -413,6 +417,151 @@ def _try_gamepad(members, vid, pid, force) -> tuple[float, bool] | None:
     return None
 
 
+def _try_nordic54(members, vid, force) -> tuple[float, bool] | None:
+    if vid not in brands.NORDIC54:
+        return None
+    targets = [i for i in members
+               if (i.get("usage_page") or 0) == 0xFF05]
+    if not targets:
+        return None
+    key = ("n54", phys_token(targets[0]["path"]))
+    if _cooled(key, force):
+        return None
+    for info in targets[:2]:
+        dev = None
+        try:
+            dev = _open(info["path"])
+            for link in (1, 0):
+                _drain(dev)
+                dev.write(proto.nordic54_request(link))
+                level = _read_until(dev, 0.25, proto.parse_nordic54, 64)
+                if level is not None:
+                    return level, False
+        except Exception:
+            continue
+        finally:
+            _close(dev)
+    _mark_fail(key)
+    return None
+
+
+def _try_steelseries(members, vid, pid, force) -> tuple[float, bool] | None:
+    if vid not in brands.STEELSERIES:
+        return None
+    targets = [i for i in members if (i.get("usage_page") or 0) == 0xFFC0]
+    if not targets:
+        return None
+    key = ("ss", phys_token(targets[0]["path"]))
+    if _cooled(key, force):
+        return None
+    direct = pid in brands.ARCTIS_DIRECT
+    queries = (
+        (bytes([0x00, 0xB0]) + bytes(62), lambda raw: proto.parse_arctis(raw, direct)),
+        (bytes([0x00, 0xD2]) + bytes(62), proto.parse_aerox),
+        (bytes([0x00, 0xAA, 0x01]) + bytes(61), proto.parse_rival3),
+    )
+    for info in targets[:3]:
+        dev = None
+        try:
+            dev = _open(info["path"])
+            for request, parse in queries:
+                _drain(dev)
+                try:
+                    dev.write(request)
+                except Exception:
+                    continue
+                hit = _read_until(dev, 0.25, parse, 64)
+                if hit is not None:
+                    return hit
+        except Exception:
+            continue
+        finally:
+            _close(dev)
+    _mark_fail(key)
+    return None
+
+
+def _try_jbl(members, vid, force) -> tuple[float, bool] | None:
+    if vid not in brands.JBL:
+        return None
+    targets = [i for i in members if (i.get("usage_page") or 0) >= 0xFF00]
+    if not targets:
+        return None
+    key = ("jbl", phys_token(targets[0]["path"]))
+    if _cooled(key, force):
+        return None
+    for info in targets[:2]:
+        dev = None
+        try:
+            dev = _open(info["path"])
+            level = _read_until(dev, 0.6, proto.parse_jbl, 32)
+            if level is not None:
+                return level, False
+        except Exception:
+            continue
+        finally:
+            _close(dev)
+    _mark_fail(key)
+    return None
+
+
+def _try_flydigi(members, vid, force) -> tuple[float, bool] | None:
+    if vid not in brands.FLYDIGI:
+        return None
+    targets = [i for i in members if (i.get("usage_page") or 0) == 0xFFA0]
+    if not targets:
+        return None
+    key = ("fly", phys_token(targets[0]["path"]))
+    if _cooled(key, force):
+        return None
+    for info in targets[:2]:
+        dev = None
+        try:
+            dev = _open(info["path"])
+            for report_id in (0x00, 0x21):
+                _drain(dev)
+                try:
+                    dev.write(proto.flydigi_request(report_id))
+                except Exception:
+                    continue
+                hit = _read_until(dev, 0.3, proto.parse_flydigi, 64)
+                if hit is not None:
+                    return hit
+        except Exception:
+            continue
+        finally:
+            _close(dev)
+    _mark_fail(key)
+    return None
+
+
+def _try_mchose_g7(members, vid, force) -> tuple[float, bool] | None:
+    if vid not in brands.MCHOSE_G7:
+        return None
+    targets = [i for i in members if (i.get("usage_page") or 0) >= 0xFF00]
+    if not targets:
+        return None
+    key = ("g7", phys_token(targets[0]["path"]))
+    if _cooled(key, force):
+        return None
+    request = proto.mchose_g7_request()
+    for info in targets[:2]:
+        dev = None
+        try:
+            dev = _open(info["path"])
+            _drain(dev)
+            dev.write(request)
+            hit = _read_until(dev, 0.35, proto.parse_mchose_g7, 64)
+            if hit is not None:
+                return hit
+        except Exception:
+            continue
+        finally:
+            _close(dev)
+    _mark_fail(key)
+    return None
+
+
 def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
     if hid is None:
         return []
@@ -437,6 +586,11 @@ def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
         ("VAXEE 电量", lambda m, v, p: _try_vaxee(m, v, force)),
         ("怒喵 电量", lambda m, v, p: _try_ajazz(m, v, force)),
         ("手柄电量", lambda m, v, p: _try_gamepad(m, v, p, force)),
+        ("Nordic54 电量", lambda m, v, p: _try_nordic54(m, v, force)),
+        ("赛睿 电量", lambda m, v, p: _try_steelseries(m, v, p, force)),
+        ("JBL 电量", lambda m, v, p: _try_jbl(m, v, force)),
+        ("飞智 电量", lambda m, v, p: _try_flydigi(m, v, force)),
+        ("迈从 电量", lambda m, v, p: _try_mchose_g7(m, v, force)),
     )
     for (vid, pid, phys), members in groups.items():
         name = _product_name(members, vid, pid)

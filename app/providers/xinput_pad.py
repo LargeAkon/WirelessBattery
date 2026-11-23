@@ -10,7 +10,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
-from model import Device, HEADSET, UNKNOWN
+from model import Device, GAMEPAD, HEADSET
 
 _LEVELS = {0: 5.0, 1: 25.0, 2: 60.0, 3: 100.0}
 # 0 未连接，1 有线。其余才是无线电池。
@@ -47,7 +47,7 @@ def scan_xinput(debug: list | None = None) -> list[Device]:
     devices: list[Device] = []
     for slot in range(4):
         for devtype, kind, label in (
-            (0x00, UNKNOWN, "无线手柄"),
+            (0x00, GAMEPAD, "无线手柄"),
             (0x01, HEADSET, "手柄耳机"),
         ):
             info = _BatteryInfo()

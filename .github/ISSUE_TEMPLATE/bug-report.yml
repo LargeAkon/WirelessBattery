@@ -1,0 +1,56 @@
+name: 程序本身出问题
+description: 崩溃、界面异常、安装失败、刷新卡住等
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本
+      description: 托盘右键菜单底部，或设置页里能看到；也可以看安装包文件名
+      placeholder: 例如 v1.5.23
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统版本
+      options:
+        - Windows 11
+        - Windows 10
+        - Windows 10 LTSC / 精简版
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题描述
+      description: 做了什么、看到了什么、期望是什么
+      placeholder: |
+        1. 打开卡片
+        2. 点击刷新
+        3. 转圈一直不停
+        期望：3 秒内出结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 报错信息或截图
+      description: 如果有 Traceback 或异常弹窗，请贴全文；截图可以直接拖进来
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告（可选）
+      description: 右键托盘 → 设备诊断 → 导出诊断报告。和设备相关的问题请附上
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 下载安装包
+    url: https://github.com/LargeAkon/WirelessBattery/releases/latest
+    about: 不想编译的话，直接下 Setup.exe，双击安装
+  - name: 先看看支持哪些设备
+    url: https://github.com/LargeAkon/WirelessBattery#%E6%94%AF%E6%8C%81%E7%9A%84%E8%AE%BE%E5%A4%87
+    about: README 里有按方案商列出的覆盖范围，以及明确说明读不到的情况

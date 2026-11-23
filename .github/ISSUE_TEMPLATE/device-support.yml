@@ -1,0 +1,71 @@
+name: 设备读不到电量
+description: 某台 2.4G 设备没有出现在列表里，或显示的电量不对
+title: "[设备适配] 品牌 型号"
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        2.4G 没有统一的电量标准，新设备需要对着真实报文补协议。
+        **请务必附上诊断报告**，没有报告的反馈无法定位问题。
+
+        获取方式：右键托盘 → 设备诊断 → 最下方「导出诊断报告」，
+        生成的 txt 在桌面上，把内容粘贴到下面，或直接把文件拖进输入框。
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备品牌与型号
+      placeholder: 例如 VGN VXE75 V2 / 罗技 G Pro X Superlight 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: link
+    attributes:
+      label: 连接方式
+      options:
+        - 2.4G 接收器（USB 小插头）
+        - USB 有线
+        - 接收器 + 有线双模
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: 具体现象
+      options:
+        - 列表里完全没有这台设备
+        - 设备出现了，但电量一直是 --
+        - 电量数字明显不对（例如驱动显示 70%，这里显示 60%）
+        - 设备一闪一闪地消失又出现
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告内容
+      description: 把导出的 txt 全文粘贴进来。里面包含 HID 端点列表与方案商标注，是补协议的唯一依据。
+      render: text
+      placeholder: 直接粘贴整份报告即可
+    validations:
+      required: true
+
+  - type: input
+    id: driver
+    attributes:
+      label: 官方驱动里显示的电量是多少（如果装了驱动）
+      placeholder: 例如 70%，没装驱动可留空
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充说明
+      placeholder: 例如设备闲置多久会休眠、是否插着充电线、换过 USB 口没有
+    validations:
+      required: false

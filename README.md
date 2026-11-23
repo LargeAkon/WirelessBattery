@@ -6,6 +6,7 @@
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D4)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
+[![download](https://img.shields.io/badge/download-WirelessBatterySetup.exe-2ea44f)](https://github.com/LargeAkon/WirelessBattery/releases/latest)
 
 ---
 
@@ -94,8 +95,8 @@
 
 ### 方式一：安装包（推荐）
 
-从 [Releases](../../releases) 下载 `WirelessBatterySetup.exe`，双击安装。
-可选安装路径、创建快捷方式、开机自启，自带卸载程序。
+到 [Releases](https://github.com/LargeAkon/WirelessBattery/releases/latest) 下载 `WirelessBatterySetup.exe`，双击安装。
+可选安装路径、创建快捷方式、开机自启，自带卸载程序。约 45 MB，已内置 Qt 运行时，不需要装 Python。
 
 ### 方式二：从源码运行
 

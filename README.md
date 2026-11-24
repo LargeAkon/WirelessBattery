@@ -183,7 +183,7 @@
 ## 安装
 
 **安装包**：到 [Releases](https://github.com/LargeAkon/WirelessBattery/releases/latest) 下载 `WirelessBatterySetup.exe`，双击安装。
-约 45 MB，内置 Qt 运行时，不需要装 Python。可选安装路径、创建快捷方式、开机自启，自带卸载程序。
+约 43 MB，内置 Qt 运行时，不需要装 Python。可选安装路径、创建快捷方式、开机自启，自带卸载程序。
 
 **从源码运行**：
 

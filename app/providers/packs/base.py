@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """协议包的公共底座：分组、开句柄、读写、冷却。
 
+协议包按设备类型分四个目录（mouse / keyboard / headset / gamepad），
+每个目录下再按品牌分文件，一个文件管这个品牌在该类型下的全部型号。
+新增一台设备的完整步骤见 `packs/README.md`。
+
 设计口径照搬参考项目（vigil-watt）的三条硬规矩，它们是用两次真实事故换来的：
 1. **只发有出处的帧**。每个家族模块里的查询帧都是从官方软件抓包或公开逆向
    文档来的；这里不提供任何"枚举/扫描/猜字节"的能力。
@@ -58,6 +62,38 @@ def path_text(m: dict) -> str:
     if isinstance(raw, bytes):
         return raw.decode("utf-8", "ignore")
     return str(raw or "")
+
+
+# 报告长度是"认设备"最常用的判据：同一颗芯片的键盘/鼠标往往只差
+# 输入输出的字节数。描述符按路径缓存在 hidreports 里，重复调用不重新解析。
+def io_lengths(m: dict) -> tuple[int, int]:
+    """该接口最长输入 / 输出报告的长度。读不到描述符时返回 (0, 0)。"""
+    from providers import hidreports
+    try:
+        reports = hidreports.reports(m.get("path"))
+    except Exception:
+        return 0, 0
+    return (max(reports.get("in", {}).values(), default=0),
+            max(reports.get("out", {}).values(), default=0))
+
+
+def out_reports(m: dict) -> dict[int, int]:
+    """该接口的输出 report ID → 总长度。认"某个 ID 存不存在"时用。"""
+    from providers import hidreports
+    try:
+        return hidreports.reports(m.get("path")).get("out", {})
+    except Exception:
+        return {}
+
+
+def feature_length(m: dict) -> int:
+    """该接口最长 feature 报告的长度；没有 feature 端点时为 0。"""
+    from providers import hidreports
+    try:
+        feats = hidreports.reports(m.get("path")).get("feat", {})
+    except Exception:
+        return 0
+    return max(feats.values()) if feats else 0
 
 
 @dataclass
@@ -223,7 +259,8 @@ def emit(ctx: Ctx, reading: Reading, default_kind: str = UNKNOWN) -> Device:
 
 __all__ = [
     "Ctx", "Reading", "cooled", "mark_fail", "clear_fail", "page", "usage",
-    "product", "path_text", "open_member", "close", "read", "drain", "write",
+    "product", "path_text", "io_lengths", "out_reports", "feature_length",
+    "open_member", "close", "read", "drain", "write",
     "wait_for", "feature_roundtrip", "feature_get", "guess_kind", "emit",
     "phys_token",
 ]

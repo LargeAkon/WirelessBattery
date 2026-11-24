@@ -15,10 +15,23 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "app"))
 
-from providers.packs import (          # noqa: E402
-    ajazz, akg, asus, atk, aula, betop, cherry, darkrim, eweadn, gamesir, ganss,
-    haute, hecate, hyperx_cf2, inphic_delux, lingbao, mchose, mojhon, pulsar,
-    rapoo, razer, sony, thunderobot, vgn,
+# 模块按设备类型分目录，一个品牌跨类型时会在不同目录下同名（如 mouse/vgn.py
+# 与 keyboard/vgn.py），所以这里按目录导入、同名的加后缀。
+from providers.packs.gamepad import (          # noqa: E402
+    betop, gamesir, haute, mojhon,
+)
+from providers.packs.headset import (          # noqa: E402
+    akg, asus as asus_hs, aula as aula_hs, darkrim, hyperx_cf2,
+    mchose as mchose_hs, razer as razer_hs, sony,
+)
+from providers.packs.keyboard import (         # noqa: E402
+    _compx, ajazz, asus as asus_kb, atk as atk_kb, aula as aula_kb, cherry,
+    eweadn as eweadn_kb, ganss, mchose as mchose_kb, vgn as vgn_kb,
+)
+from providers.packs.mouse import (            # noqa: E402
+    atk as atk_m, aula as aula_m, eweadn as eweadn_m, hecate, inphic_delux,
+    lingbao, mchose as mchose_m, pulsar, rapoo, razer as razer_m, thunderobot,
+    vgn as vgn_m,
 )
 
 FAILS: list[str] = []
@@ -168,17 +181,17 @@ def test_thunderobot() -> None:
 
 def test_eweadn() -> None:
     print("前行者 EWEADN")
-    check("X87 85%", eweadn.parse_keyboard(bytes([0x20, 0x01, 0x00, 85])), 85)
+    check("X87 85%", eweadn_kb.parse(bytes([0x20, 0x01, 0x00, 85])), 85)
     check("X87 0% 视为未就绪",
-          eweadn.parse_keyboard(bytes([0x20, 0x01, 0x00, 0])), None)
+          eweadn_kb.parse(bytes([0x20, 0x01, 0x00, 0])), None)
     check("S9 73% 不充电",
-          eweadn.parse_mouse(hexb("0350000B020149")), (73, False))
-    check("S9 充电位", eweadn.parse_mouse(hexb("0350000B0201C9")), (73, True))
-    frame = bytearray(eweadn.keyboard_query())
+          eweadn_m.parse(hexb("0350000B020149")), (73, False))
+    check("S9 充电位", eweadn_m.parse(hexb("0350000B0201C9")), (73, True))
+    frame = bytearray(eweadn_kb.build_query())
     frame[32] = 0                       # 校验位本身要按 0 参与求和
-    check("X87 校验", eweadn.keyboard_query()[-1], sum(frame) & 0xFF)
-    check("S9 CRC 范围", eweadn.mouse_query()[0],
-          sum(eweadn.mouse_query()[1:]) & 0xFF)
+    check("X87 校验", eweadn_kb.build_query()[-1], sum(frame) & 0xFF)
+    check("S9 CRC 范围", eweadn_m.build_query()[0],
+          sum(eweadn_m.build_query()[1:]) & 0xFF)
 
 
 def test_asus() -> None:
@@ -189,9 +202,9 @@ def test_asus() -> None:
     kb[2] = 1
     kb[6] = 95
     kb[9] = 0
-    check("键盘 95% 不充电", asus._parse_battery(bytes(kb)), (95, False))
+    check("键盘 95% 不充电", asus_kb._parse_battery(bytes(kb)), (95, False))
     kb[9] = 1
-    check("键盘充电位", asus._parse_battery(bytes(kb)), (95, True))
+    check("键盘充电位", asus_kb._parse_battery(bytes(kb)), (95, True))
 
     paired = bytearray(64)
     paired[0] = 1
@@ -201,10 +214,10 @@ def test_asus() -> None:
     paired[6] = 0x1A                   # PID 0x1AAE
     paired[7] = 2                      # keyboard report
     paired[8] = 4
-    check("配对表认出 Scope", asus._parse_paired(bytes(paired)), 0x1AAE)
+    check("配对表认出 Scope", asus_kb._parse_paired(bytes(paired)), 0x1AAE)
     paired[5] = 0x11
     paired[6] = 0x22
-    check("别的键盘不认领", asus._parse_paired(bytes(paired)), None)
+    check("别的键盘不认领", asus_kb._parse_paired(bytes(paired)), None)
 
     hs = bytearray(64)
     hs[0] = 0xCC
@@ -212,10 +225,10 @@ def test_asus() -> None:
     hs[2] = 0x07
     hs[6] = 88
     hs[7] = 20
-    data = asus._parse_headset(asus.CMD_POWER)(bytes(hs))
+    data = asus_hs._parse_headset(asus_hs.CMD_POWER)(bytes(hs))
     check("耳机电量字段", data[1], 88)
     hs[6] = 0xFE
-    data = asus._parse_headset(asus.CMD_POWER)(bytes(hs))
+    data = asus_hs._parse_headset(asus_hs.CMD_POWER)(bytes(hs))
     check("0xFE 是未就绪", data[1], 0xFE)
 
 
@@ -243,24 +256,24 @@ def test_rapoo() -> None:
 
 def test_atk() -> None:
     print("ATK / VXE")
-    check("查询帧", atk.build_mouse_query().hex().upper(),
+    check("查询帧", atk_m.build_query().hex().upper(),
           "0804" + "00" * 14 + "49")
     # 真机：A9 Air 大师版+ 无线 65%
-    check("无线 65%", atk.parse_mouse(hexb("08040000000241000FCD0000000000002A")),
+    check("无线 65%", atk_m.parse(hexb("08040000000241000FCD0000000000002A")),
           (65, False))
     # 真机：同鼠标插线 80% 充电
     check("有线 80% 充电",
-          atk.parse_mouse(hexb("0804000000025001105E00000000000088")), (80, True))
+          atk_m.parse(hexb("0804000000025001105E00000000000088")), (80, True))
     # 休眠时固件不回应；构造出来的 0% 帧必须被拒
     check("0% 占位被拒",
-          atk.parse_mouse(hexb("0804010000000000000000000000000048")), None)
+          atk_m.parse(hexb("0804010000000000000000000000000048")), None)
     # 鼠标移动报文不能被当成电量帧
     check("移动报文被拒",
-          atk.parse_mouse(hexb("080102030405060708090A0B0C0D0E0F10")), None)
-    check("VIA 查询帧", atk.build_via_query(9)[:5], bytes([0x00, 0x02, 0x96, 0x24, 0x00]))
+          atk_m.parse(hexb("080102030405060708090A0B0C0D0E0F10")), None)
+    check("VIA 查询帧", atk_kb.build_query(9)[:5], bytes([0x00, 0x02, 0x96, 0x24, 0x00]))
     check("VIA 应答 72% 充电",
-          atk.parse_via(bytes([0x00, 0x02, 0x96, 0x24, 72, 1])), (72, True))
-    check("VIA 非本命令", atk.parse_via(bytes([0x00, 0x02, 0x97, 0x24, 72, 1])), None)
+          atk_kb.parse(bytes([0x00, 0x02, 0x96, 0x24, 72, 1])), (72, True))
+    check("VIA 非本命令", atk_kb.parse(bytes([0x00, 0x02, 0x97, 0x24, 72, 1])), None)
 
 
 def test_vgn() -> None:
@@ -268,41 +281,41 @@ def test_vgn() -> None:
     # kc2：64 字节，命令 0x06 回显，电量在第 19 字节（bit7 = 充电）
     kc2 = bytearray(64)
     kc2[0] = 0xB3
-    kc2[1] = vgn.KC2_CMD
+    kc2[1] = vgn_m.KC2_CMD
     kc2[3:8] = bytes([1, 2, 3, 0, 5])
-    kc2[1 + vgn.KC2_LEVEL] = 68 | 0x80
-    check("kc2 68% 充电", vgn.parse_kc2(bytes(kc2)), (68, True))
-    kc2[1 + vgn.KC2_LEVEL] = 68
-    check("kc2 68% 放电", vgn.parse_kc2(bytes(kc2)), (68, False))
+    kc2[1 + vgn_m.KC2_LEVEL] = 68 | 0x80
+    check("kc2 68% 充电", vgn_m.parse_kc2(bytes(kc2)), (68, True))
+    kc2[1 + vgn_m.KC2_LEVEL] = 68
+    check("kc2 68% 放电", vgn_m.parse_kc2(bytes(kc2)), (68, False))
     blank = bytearray(64)
-    blank[1] = vgn.KC2_CMD
-    check("kc2 全零缓冲被拒", vgn.parse_kc2(bytes(blank)), None)
+    blank[1] = vgn_m.KC2_CMD
+    check("kc2 全零缓冲被拒", vgn_m.parse_kc2(bytes(blank)), None)
 
     # y2：17 字节，[0]=0x08 / [1]=0x04 / [15]=校验
     y2 = bytearray(16)
-    y2[0] = vgn.Y2_CMD
+    y2[0] = vgn_m.Y2_CMD
     y2[1] = 0
     y2[3] = 1
     y2[4] = 2
     y2[5] = 41
     y2[6] = 1
-    y2[15] = vgn.y2_checksum(bytes(y2))
-    check("y2 41% 充电", vgn.parse_y2(bytes([vgn.Y2_RID]) + bytes(y2)), (41, True))
+    y2[15] = vgn_m.y2_checksum(bytes(y2))
+    check("y2 41% 充电", vgn_m.parse_y2(bytes([vgn_m.Y2_RID]) + bytes(y2)), (41, True))
     bad = bytearray(y2)
     bad[15] ^= 0xFF
-    check("y2 坏校验被拒", vgn.parse_y2(bytes([vgn.Y2_RID]) + bytes(bad)), None)
+    check("y2 坏校验被拒", vgn_m.parse_y2(bytes([vgn_m.Y2_RID]) + bytes(bad)), None)
 
     # V98 Pro：0x04 / [3]=0x1A / 电量 [8]
     v98 = bytearray(20)
-    v98[0] = vgn.V98_RID
+    v98[0] = vgn_kb.RID
     v98[3] = 0x1A
     v98[8] = 87
     v98[9] = 0
-    check("V98 87%", vgn.parse_v98(bytes(v98)), (87, False))
+    check("V98 87%", vgn_kb.parse(bytes(v98)), (87, False))
     v98[9] = 1
-    check("V98 充电", vgn.parse_v98(bytes(v98)), (87, True))
+    check("V98 充电", vgn_kb.parse(bytes(v98)), (87, True))
     v98[3] = 0x1B
-    check("V98 非电量帧被拒", vgn.parse_v98(bytes(v98)), None)
+    check("V98 非电量帧被拒", vgn_kb.parse(bytes(v98)), None)
 
 
 def test_sony() -> None:
@@ -355,53 +368,53 @@ def test_aula() -> None:
     print("狼蛛 AULA")
     # G9：0xAB + 47 4D 86
     g9 = bytearray(64)
-    g9[0] = aula.G9_RID
+    g9[0] = aula_hs.RID
     g9[1:4] = bytes([0x47, 0x4D, 0x86])
-    g9[aula.G9_LEVEL] = 76
-    g9[aula.G9_CHARGE] = 0x02
-    check("G9 76% 充电", aula.g9_parse(bytes(g9)), (76, True))
-    g9[aula.G9_CHARGE] = 0
-    check("G9 76% 放电", aula.g9_parse(bytes(g9)), (76, False))
-    g9[aula.G9_LEVEL] = 0
-    check("G9 全零视为旧固件不报数", aula.g9_parse(bytes(g9)), None)
-    g9[aula.G9_LEVEL] = 50
+    g9[aula_hs.LEVEL_INDEX] = 76
+    g9[aula_hs.CHARGE_INDEX] = 0x02
+    check("G9 76% 充电", aula_hs.parse(bytes(g9)), (76, True))
+    g9[aula_hs.CHARGE_INDEX] = 0
+    check("G9 76% 放电", aula_hs.parse(bytes(g9)), (76, False))
+    g9[aula_hs.LEVEL_INDEX] = 0
+    check("G9 全零视为旧固件不报数", aula_hs.parse(bytes(g9)), None)
+    g9[aula_hs.LEVEL_INDEX] = 50
     g9[3] = 0x85
-    check("G9 帧头不符", aula.g9_parse(bytes(g9)), None)
+    check("G9 帧头不符", aula_hs.parse(bytes(g9)), None)
 
     # L9：0A 81 …，电量 [18] / 充电 [17]
     l9 = bytearray(24)
-    l9[0] = aula.L9_IN_ID
-    l9[1] = aula.L9_CMD
-    l9[aula.L9_LEVEL_INDEX] = 55
-    l9[aula.L9_CHARGE_INDEX] = 1
-    check("L9 55% 充电", aula.l9_parse(bytes(l9)), (55, True))
+    l9[0] = aula_m.IN_ID
+    l9[1] = aula_m.CMD
+    l9[aula_m.LEVEL_INDEX] = 55
+    l9[aula_m.CHARGE_INDEX] = 1
+    check("L9 55% 充电", aula_m.parse(bytes(l9)), (55, True))
     l9[0] = 0x0B
-    check("L9 应答号不符", aula.l9_parse(bytes(l9)), None)
+    check("L9 应答号不符", aula_m.parse(bytes(l9)), None)
 
     # V1 帧（F99 Pro / 迈从键盘）：推送 0x0A / 应答 0x4A
     push = bytearray(20)
-    push[0] = aula.V1_RID
-    push[1] = aula.V1_PUSH
-    push[5] = aula.V1_PUSH_BATTERY
+    push[0] = _compx.RID
+    push[1] = _compx.PUSH
+    push[5] = _compx.PUSH_BATTERY
     push[6] = 47
     push[7] = 0x10
-    check("V1 推送 47% 充电", aula.v1_read(bytes(push)), (47, True))
+    check("V1 推送 47% 充电", _compx.read(bytes(push)), (47, True))
     push[7] = 0
-    check("V1 推送 47% 放电", aula.v1_read(bytes(push)), (47, False))
+    check("V1 推送 47% 放电", _compx.read(bytes(push)), (47, False))
     push[5] = 0x06
-    check("V1 非电量推送", aula.v1_read(bytes(push)), None)
+    check("V1 非电量推送", _compx.read(bytes(push)), None)
 
     reply = bytearray(20)
-    reply[0] = aula.V1_RID
-    reply[1] = aula.V1_QUERY
+    reply[0] = _compx.RID
+    reply[1] = _compx.QUERY
     reply[5] = 66
     reply[6] = 0
-    check("V1 应答 66%", aula.v1_read(bytes(reply)), (66, False))
+    check("V1 应答 66%", _compx.read(bytes(reply)), (66, False))
     reply[5] = 0
-    check("V1 应答 0% 被拒", aula.v1_read(bytes(reply)), None)
+    check("V1 应答 0% 被拒", _compx.read(bytes(reply)), None)
 
     # HERO 68 Air：应答帧 [0]=命令 / [1]=参数 / [5]=长度 / 尾部让 sum+ID = 0xFF
-    hero = bytearray(aula.HERO_PACKET)
+    hero = bytearray(aula_kb.HERO_PACKET)
     hero[0] = 0x87
     hero[1] = 0
     hero[2] = 0
@@ -410,11 +423,11 @@ def test_aula() -> None:
     hero[5] = 2
     hero[6] = 74
     hero[7] = 0
-    hero[-1] = (255 - (sum(hero[:-1]) + aula.HERO_RID)) & 0xFF
-    check("HERO 74% 放电", aula.hero_parse_battery(bytes(hero)), (74, False))
+    hero[-1] = (255 - (sum(hero[:-1]) + aula_kb.HERO_RID)) & 0xFF
+    check("HERO 74% 放电", aula_kb.hero_parse_battery(bytes(hero)), (74, False))
     hero[7] = 0x10
-    hero[-1] = (255 - (sum(hero[:-1]) + aula.HERO_RID)) & 0xFF
-    check("HERO 74% 充电", aula.hero_parse_battery(bytes(hero)), (74, True))
+    hero[-1] = (255 - (sum(hero[:-1]) + aula_kb.HERO_RID)) & 0xFF
+    check("HERO 74% 充电", aula_kb.hero_parse_battery(bytes(hero)), (74, True))
 
 
 def test_hyperx_cf2() -> None:
@@ -431,110 +444,110 @@ def test_hyperx_cf2() -> None:
 def test_razer() -> None:
     print("雷蛇")
     # 经典 90 字节：请求帧 [1]=事务号 / [5]=2 / [6]=0x07 / [7]=命令 / [88]=校验
-    req = razer.classic_request(razer.CMD_BATTERY, razer.CLASSIC_TXN)
-    check("经典请求长度", len(req), razer.CLASSIC_PAYLOAD)
+    req = razer_m.classic_request(razer_m.CMD_BATTERY, razer_m.CLASSIC_TXN)
+    check("经典请求长度", len(req), razer_m.CLASSIC_PAYLOAD)
     check("经典请求命令区", (req[1], req[5], req[6], req[7]),
-          (razer.CLASSIC_TXN, 0x02, razer.CLASS_BATTERY, razer.CMD_BATTERY))
-    check("经典请求校验", req[88], razer.classic_checksum(req))
+          (razer_m.CLASSIC_TXN, 0x02, razer_m.CLASS_BATTERY, razer_m.CMD_BATTERY))
+    check("经典请求校验", req[88], razer_m.classic_checksum(req))
 
-    reply = bytearray(razer.CLASSIC_BUFFER)
-    reply[1] = razer.STATUS_OK
-    reply[7] = razer.CLASS_BATTERY
-    reply[8] = razer.CMD_BATTERY
+    reply = bytearray(razer_m.CLASSIC_BUFFER)
+    reply[1] = razer_m.STATUS_OK
+    reply[7] = razer_m.CLASS_BATTERY
+    reply[8] = razer_m.CMD_BATTERY
     reply[10] = 204
-    check("经典回显判定", razer.classic_echo(bytes(reply), razer.CMD_BATTERY), True)
-    check("经典 204/255 = 80%", razer.classic_percent(bytes(reply)), 80)
+    check("经典回显判定", razer_m.classic_echo(bytes(reply), razer_m.CMD_BATTERY), True)
+    check("经典 204/255 = 80%", razer_m.classic_percent(bytes(reply)), 80)
     busy = bytearray(reply)
-    busy[1] = razer.STATUS_BUSY
-    check("忙状态不算回显", razer.classic_echo(bytes(busy), razer.CMD_BATTERY), False)
+    busy[1] = razer_m.STATUS_BUSY
+    check("忙状态不算回显", razer_m.classic_echo(bytes(busy), razer_m.CMD_BATTERY), False)
 
     # Viper SE：91 字节，[0]=0，payload 从 [1] 开始
-    se = bytearray(razer.CLASSIC_BUFFER)
+    se = bytearray(razer_m.CLASSIC_BUFFER)
     se[0] = 0
-    se[1] = razer.STATUS_OK
-    se[2] = razer.CLASSIC_TXN
+    se[1] = razer_m.STATUS_OK
+    se[2] = razer_m.CLASSIC_TXN
     se[3] = se[4] = se[5] = 0
     se[6] = 2
-    se[7] = razer.CLASS_BATTERY
-    se[8] = razer.CMD_BATTERY
+    se[7] = razer_m.CLASS_BATTERY
+    se[8] = razer_m.CMD_BATTERY
     se[10] = 128
-    se[89] = razer.classic_checksum(se[1:])
+    se[89] = razer_m.classic_checksum(se[1:])
     se[90] = 0
-    check("SE 128/255 ≈ 50%", razer.se_parse(bytes(se)), (128 * 100 + 127) // 255)
+    check("SE 128/255 ≈ 50%", razer_m.se_parse(bytes(se)), (128 * 100 + 127) // 255)
     se[90] = 1
-    check("SE 尾部非零被拒", razer.se_parse(bytes(se)), None)
+    check("SE 尾部非零被拒", razer_m.se_parse(bytes(se)), None)
 
     # PA 耳机：真机 79% 放电
     pa = hexb("020E504908CE92DE050004002101014F4901C00C6B00000300119313000000000000000000000000000000000000000000000000000000000000000000000000")
-    check("PA 耳机电量 79%", razer.pa_parse(pa, razer.PA_BATTERY), 79)
+    check("PA 耳机电量 79%", razer_hs.pa_parse(pa, razer_hs.PA_BATTERY), 79)
     pa_charge = hexb("020E504908CFB6E0050004002A0101004901C00C6B00000300119313000000000000000000000000000000000000000000000000000000000000000000000000")
-    check("PA 耳机放电标志", razer.pa_parse(pa_charge, razer.PA_CHARGING), 0)
-    check("PA 命令不符被拒", razer.pa_parse(pa, razer.PA_CHARGING), None)
+    check("PA 耳机放电标志", razer_hs.pa_parse(pa_charge, razer_hs.PA_CHARGING), 0)
+    check("PA 命令不符被拒", razer_hs.pa_parse(pa, razer_hs.PA_CHARGING), None)
 
     # Kraken V4：真机 63% 放电
     kraken = hexb("020260000000050080802101013F0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007900")
-    check("Kraken 63%", razer.kraken_parse(kraken, razer.KRAKEN_BATTERY), 63)
+    check("Kraken 63%", razer_hs.kraken_parse(kraken, razer_hs.KRAKEN_BATTERY), 63)
     kraken_charge = hexb("020260000000050080802A0101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004D00")
-    check("Kraken 未充电", razer.kraken_parse(kraken_charge, razer.KRAKEN_CHARGING), 0)
-    check("Kraken 查询帧头", razer.kraken_query(razer.KRAKEN_BATTERY)[:13].hex().upper(),
+    check("Kraken 未充电", razer_hs.kraken_parse(kraken_charge, razer_hs.KRAKEN_CHARGING), 0)
+    check("Kraken 查询帧头", razer_hs.kraken_query(razer_hs.KRAKEN_BATTERY)[:13].hex().upper(),
           "02006000000004000080210000")
 
 
 def test_mchose() -> None:
     print("迈从 MCHOSE")
     # V1 帧（键盘）：推送 0x0A / 应答 0x4A，充电位在 bit4
-    push = bytearray(mchose.V1_LEN)
-    push[0] = mchose.V1_RID
-    push[1] = mchose.V1_PUSH
-    push[5] = mchose.V1_PUSH_BATTERY
+    push = bytearray(mchose_kb.V1_LEN)
+    push[0] = mchose_kb.V1_RID
+    push[1] = mchose_kb.V1_PUSH
+    push[5] = mchose_kb.V1_PUSH_BATTERY
     push[6] = 52
     push[7] = 0x10
-    check("V1 推送 52% 充电", mchose.v1_read(bytes(push)), (52, True))
+    check("V1 推送 52% 充电", mchose_kb.v1_read(bytes(push)), (52, True))
     push[7] = 0
-    check("V1 推送 52% 放电", mchose.v1_read(bytes(push)), (52, False))
+    check("V1 推送 52% 放电", mchose_kb.v1_read(bytes(push)), (52, False))
     push[6] = 1
-    check("V1 1% 视为占位", mchose.v1_read(bytes(push)), None)
+    check("V1 1% 视为占位", mchose_kb.v1_read(bytes(push)), None)
 
-    reply = bytearray(mchose.V1_LEN)
-    reply[0] = mchose.V1_RID
-    reply[1] = mchose.V1_QUERY
+    reply = bytearray(mchose_kb.V1_LEN)
+    reply[0] = mchose_kb.V1_RID
+    reply[1] = mchose_kb.V1_QUERY
     reply[5] = 39
     reply[6] = 0
-    check("V1 应答 39%", mchose.v1_read(bytes(reply)), (39, False))
+    check("V1 应答 39%", mchose_kb.v1_read(bytes(reply)), (39, False))
 
     # 会话帧里的型号密码：G87
-    session = bytearray(mchose.V1_LEN)
-    session[0] = mchose.V1_RID
-    session[1] = mchose.V1_SESSION
+    session = bytearray(mchose_kb.V1_LEN)
+    session[0] = mchose_kb.V1_RID
+    session[1] = mchose_kb.V1_SESSION
     session[2] = 0x01
     session[5:11] = bytes.fromhex("03000000021C")
-    check("会话型号 G87", mchose.v1_model(bytes(session)), "G87")
+    check("会话型号 G87", mchose_kb.v1_model(bytes(session)), "G87")
     session[5:11] = bytes.fromhex("FFFFFFFFFFFF")
-    check("未知型号密码", mchose.v1_model(bytes(session)), None)
+    check("未知型号密码", mchose_kb.v1_model(bytes(session)), None)
 
     # 鼠标 V2：整帧取反，[0]=0xE2，[3]=充电，[4]=电量
     v2 = bytearray(16)
-    v2[0] = mchose.V2_STATUS ^ 0xFF
+    v2[0] = mchose_m.V2_STATUS ^ 0xFF
     v2[3] = 0x01 ^ 0xFF
     v2[4] = 61 ^ 0xFF
-    check("V2 反码 61% 充电", mchose.v2_parse(bytes(v2)), (61, True))
+    check("V2 反码 61% 充电", mchose_m.v2_parse(bytes(v2)), (61, True))
     v2[3] = 0x00 ^ 0xFF
-    check("V2 反码 61% 放电", mchose.v2_parse(bytes(v2)), (61, False))
+    check("V2 反码 61% 放电", mchose_m.v2_parse(bytes(v2)), (61, False))
     v2[4] = 0 ^ 0xFF
-    check("V2 0% 被拒", mchose.v2_parse(bytes(v2)), None)
-    check("V2 poke 帧", mchose.v2_poke(16)[:2],
-          bytes([mchose.V2_POKE_RID, mchose.V2_POKE_CMD ^ 0xFF]))
+    check("V2 0% 被拒", mchose_m.v2_parse(bytes(v2)), None)
+    check("V2 poke 帧", mchose_m.v2_poke(16)[:2],
+          bytes([mchose_m.V2_POKE_RID, mchose_m.V2_POKE_CMD ^ 0xFF]))
 
     # K7：4D 01 01 <len> <cmd lo> <cmd hi> …，电量在载荷 +12
     payload = bytearray(16)
     payload[10] = 1                    # 已连接
     payload[11] = 1                    # 充电
     payload[12] = 84                   # 电量
-    frame = mchose.k7_frame(0x0900, bytes(payload))
-    check("K7 84% 充电/已连接", mchose.k7_parse(frame), (84, 1, 1))
-    check("K7 命令不符被拒", mchose.k7_parse(frame, ), (84, 1, 1))
-    other = mchose.k7_frame(0x0901, bytes(payload))
-    check("K7 另一命令读不到电量", mchose.k7_parse(other), None)
+    frame = mchose_kb.k7_frame(0x0900, bytes(payload))
+    check("K7 84% 充电/已连接", mchose_kb.k7_parse(frame), (84, 1, 1))
+    check("K7 命令不符被拒", mchose_kb.k7_parse(frame, ), (84, 1, 1))
+    other = mchose_kb.k7_frame(0x0901, bytes(payload))
+    check("K7 另一命令读不到电量", mchose_kb.k7_parse(other), None)
 
     # Gmouse：AA 30 …
     gm = bytearray(16)
@@ -542,10 +555,10 @@ def test_mchose() -> None:
     gm[1] = 0x30
     gm[8] = 44
     gm[9] = 0
-    check("Gmouse 44%", mchose.gmouse_parse(bytes(gm)), (44, False))
+    check("Gmouse 44%", mchose_m.gmouse_parse(bytes(gm)), (44, False))
     gm[9] = 1
-    check("Gmouse 充电", mchose.gmouse_parse(bytes(gm)), (44, True))
-    check("Gmouse 查询帧", mchose.gmouse_query()[1:9],
+    check("Gmouse 充电", mchose_m.gmouse_parse(bytes(gm)), (44, True))
+    check("Gmouse 查询帧", mchose_m.gmouse_query()[1:9],
           bytes([0x55, 0x30, 0xA5, 0x0B, 0x2E, 0x01, 0x01, 0x01]))
 
     # A5 V2 Ultra：反码 feature 0x11
@@ -558,44 +571,44 @@ def test_mchose() -> None:
     a5[5] = 0x11 ^ 0xFF
     a5[11] = 73 ^ 0xFF
     a5[12] = 1 ^ 0xFF
-    check("A5 73% 充电", mchose.a5_parse(bytes(a5)), (73, True))
+    check("A5 73% 充电", mchose_m.a5_parse(bytes(a5)), (73, True))
     a5[12] = 2 ^ 0xFF
-    check("A5 充电位未知", mchose.a5_parse(bytes(a5)), (73, None))
+    check("A5 充电位未知", mchose_m.a5_parse(bytes(a5)), (73, None))
     a5[3] = 0x00
-    check("A5 VID 不符被拒", mchose.a5_parse(bytes(a5)), None)
+    check("A5 VID 不符被拒", mchose_m.a5_parse(bytes(a5)), None)
 
     # 耳机 V9 / X9：55 65 …
-    hs = bytearray(mchose.HS_LEN)
-    hs[0] = mchose.HS_RID
-    hs[1] = mchose.HS_ECHO
+    hs = bytearray(mchose_hs.HS_LEN)
+    hs[0] = mchose_hs.HS_RID
+    hs[1] = mchose_hs.HS_ECHO
     hs[2] = 64
     hs[3] = 0x03
-    check("耳机 64% 充电", mchose.hs_parse(bytes(hs), True), (64, True))
+    check("耳机 64% 充电", mchose_hs.hs_parse(bytes(hs), True), (64, True))
     hs[3] = 0x02
-    check("耳机 64% 放电", mchose.hs_parse(bytes(hs), True), (64, False))
-    check("耳机回显被拒", mchose.hs_parse(mchose.hs_query(), True), None)
-    check("耳机查询帧头", mchose.hs_query()[:3],
-          bytes([mchose.HS_RID, mchose.HS_ECHO, 0x01]))
+    check("耳机 64% 放电", mchose_hs.hs_parse(bytes(hs), True), (64, False))
+    check("耳机回显被拒", mchose_hs.hs_parse(mchose_hs.hs_query(), True), None)
+    check("耳机查询帧头", mchose_hs.hs_query()[:3],
+          bytes([mchose_hs.HS_RID, mchose_hs.HS_ECHO, 0x01]))
 
     # 新代 dongle（QHW）：握手 4D AA 55 AA 55 AA 55，查询 4D 01 03 00 04 09 …
-    hs_frame = mchose.qhw_handshake(64)
+    hs_frame = mchose_kb.qhw_handshake(64)
     check("QHW 握手帧头", hs_frame[:7],
-          bytes([mchose.QHW_RID]) + bytes([0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55]))
-    q = mchose.qhw_query(64)
+          bytes([mchose_kb.QHW_RID]) + bytes([0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55]))
+    q = mchose_kb.qhw_query(64)
     check("QHW 查询命令", q[:6], bytes([0x4D, 0x01, 0x03, 0x00, 0x04, 0x09]))
     check("QHW 查询校验", q[8], q[1] ^ q[2] ^ q[3] ^ q[4] ^ q[5] ^ q[6] ^ q[7])
     reply = bytes([0x4D, 0x01, 0x00, 0x00, 0x04, 0x09, 0x00, 0x01, 0x00, 82]) + bytes(54)
-    check("QHW 应答 82% 放电", mchose.qhw_parse(reply), (82, False))
+    check("QHW 应答 82% 放电", mchose_kb.qhw_parse(reply), (82, False))
     reply = bytes([0x4D, 0x01, 0x00, 0x00, 0x04, 0x09, 0x00, 0x01, 0x01, 82]) + bytes(54)
-    check("QHW 应答 82% 充电", mchose.qhw_parse(reply), (82, True))
+    check("QHW 应答 82% 充电", mchose_kb.qhw_parse(reply), (82, True))
     reply = bytes([0x4D, 0x01, 0x00, 0x00, 0x04, 0x09, 0x00, 0x01, 0x00, 1]) + bytes(54)
-    check("QHW 1% 占位帧被拒", mchose.qhw_parse(reply), None)
+    check("QHW 1% 占位帧被拒", mchose_kb.qhw_parse(reply), None)
     reply = bytes([0x4D, 0x01, 0x00, 0x00, 0x05, 0x09, 0x00, 0x01, 0x00, 82]) + bytes(54)
-    check("QHW 命令不符被拒", mchose.qhw_parse(reply), None)
+    check("QHW 命令不符被拒", mchose_kb.qhw_parse(reply), None)
     push = bytes([0xFA, 0xFB, 0x07, 79, 1]) + bytes(59)
-    check("QHW CZ 推送 79% 充电", mchose.qhw_parse_push(push), (79, True))
+    check("QHW CZ 推送 79% 充电", mchose_kb.qhw_parse_push(push), (79, True))
     push = bytes([0xFA, 0xFB, 0x07, 0, 0]) + bytes(59)
-    check("QHW CZ 0% 被拒", mchose.qhw_parse_push(push), None)
+    check("QHW CZ 0% 被拒", mchose_kb.qhw_parse_push(push), None)
 
 
 def test_akg() -> None:

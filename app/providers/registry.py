@@ -125,7 +125,7 @@ def _channels() -> tuple[Channel, ...]:
     return (
         Channel("packs", "协议包",
                 lambda d, f: packs.scan(d, force=f),
-                "逐型号私有协议（2.4G 接收器与 USB 有线）"),
+                "逐型号私有协议，按鼠标/键盘/耳机/手柄分目录"),
         Channel("evision", "Evision",
                 lambda d, f: evision.scan_evision(d, force=f),
                 "Evision/Compx 芯片方案的 2.4G 接收器"),

@@ -163,6 +163,10 @@
 （`tools/test_packs.py`，178 项）。**会写帧的家族**（雷蛇、迈从、K7、A5、AKG、GANSS、ATK/VGN、北通、
 华硕、CHERRY、雷神、凌豹、墨将、前行者、HECATE、索尼、Haute42）默认每轮只发一条查询，失败进 150 秒冷却。
 
+协议代码按 **鼠标 / 键盘 / 耳机 / 手柄** 分目录，一个品牌一个文件；品牌跨类型时会在多个目录下出现同名文件
+（`mouse/vgn.py` 管蜻蜓鼠标，`keyboard/vgn.py` 管 V98 Pro）。想自己加一台设备，看
+[`app/providers/packs/README.md`](app/providers/packs/README.md)：三步流程、模板代码、判据表都写在里面。
+
 **暂不支持**
 
 | 情况 | 原因 |
@@ -244,7 +248,12 @@ app/
   vendors.py    芯片与系统设备的方案商对照
   providers/    各条电量通道，一个文件一套协议
     registry.py   通道清单与来源规则（谁读、优先级、保留时长、合并权重）
-    packs/        逐型号私有协议，一个文件一个家族
+    packs/        逐型号私有协议，按「设备类型 → 品牌 → 型号」组织
+      mouse/        鼠标：vgn.py 管蜻蜓 F1/F2，razer.py 管毒蝰
+      keyboard/     键盘：vgn.py 管 V98 Pro，cherry.py 管 PIXIU75
+      headset/      耳机：sony.py 管 INZONE H9 II，akg.py 管 N9 Hybrid
+      gamepad/      手柄：gamesir.py 管 G7 Pro，betop.py 管北通
+      README.md     加一台新设备改哪个文件：三步流程 + 模板 + 判据表
     added.py      「添加设备」写进来的外置协议
   ui/           卡片、诊断窗口、换肤动效、毛玻璃、图标绘制
 installer/      安装向导（打包成单文件 Setup.exe）

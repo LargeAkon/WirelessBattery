@@ -210,6 +210,38 @@ def test_merge() -> None:
     _check("two receivers stay", len(merged) == 2)
 
 
+def test_packs_layout() -> None:
+    """协议包目录：类型 → 品牌 → 型号。每个模块都要写清适配什么设备。
+
+    开源之后别人加设备是照着现有文件改的，所以这里把"注释格式"也当契约测：
+    文件头必须以【类型】开头、必须有「适配设备」一节，且能对上所在目录。
+    """
+    from providers import packs
+    from providers.packs import gamepad, headset, keyboard, mouse
+
+    groups = (("mouse", mouse), ("keyboard", keyboard),
+              ("headset", headset), ("gamepad", gamepad))
+    seen: list[str] = []
+    for name, group in groups:
+        _check(f"{name} 目录有模块", len(group.MODULES) > 0)
+        for module in group.MODULES:
+            short = module.__name__.rsplit(".", 1)[-1]
+            tag = f"{name}/{short}"
+            doc = (module.__doc__ or "").strip()
+            _check(f"{tag} 在 {name} 目录", f".{name}." in module.__name__)
+            _check(f"{tag} 头部标了类型", doc.startswith("【"))
+            _check(f"{tag} 写了适配设备", "适配设备" in doc)
+            _check(f"{tag} 有 match", callable(getattr(module, "match", None)))
+            _check(f"{tag} 有 probe", callable(getattr(module, "probe", None)))
+            seen.append(module.__name__)
+
+    expected = [m for _, group in groups for m in group.MODULES]
+    _check("PACKS 与四类顺序一致", list(packs.PACKS) == expected)
+    _check("没有重复登记", len(set(seen)) == len(seen))
+    _check("共用模块不参与扫描",
+           all("_compx" not in m.__name__ for m in packs.PACKS))
+
+
 if __name__ == "__main__":
     test_compx()
     test_hidpp_version()
@@ -221,4 +253,5 @@ if __name__ == "__main__":
     test_descriptor()
     test_endpoints()
     test_merge()
+    test_packs_layout()
     print("ALL OK")

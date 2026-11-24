@@ -1,15 +1,25 @@
 # -*- coding: utf-8 -*-
-"""协议包：从 vigil-watt 移植过来的厂商协议。
+"""协议包：逐型号的厂商私有协议，按「设备类型 → 品牌 → 型号」三级组织。
 
-一个家族 = 一个模块，暴露三个东西：
+    mouse/      鼠标    vgn.py 管 VGN 的蜻蜓 F1 / F2
+    keyboard/   键盘    vgn.py 管 VGN 的 V98 Pro
+    headset/    耳机
+    gamepad/    手柄
+
+一个品牌跨类型时，会在多个目录下出现同名文件（例如 mouse/vgn.py 与
+keyboard/vgn.py），各管各的链路，互不干扰。每个模块头部都写清了
+「适配设备 / 怎么认 / 怎么读 / 注意」，新增设备的步骤见 `packs/README.md`。
+
+模块暴露三样东西：
     match(ctx)  -> bool         只看接口指纹，不做 I/O（除了读描述符，已缓存）
     probe(ctx, force) -> Reading | None
     ALL = True                  可选：需要把同一 VID:PID 的**所有接口**放进
                                 同一个 ctx（华硕 Omni 接收器要在控制接口上
                                 核对配对表，电量却在键盘接口上）
+    LABEL = "华硕"               可选：调试日志里的名字
 
-调用顺序按 PACKS 顺序来，命中一条就停 —— 同一只接收器上的多套协议里，
-先验证过的那条优先。
+`PACKS` 的顺序 = 优先级：鼠标 → 键盘 → 耳机 → 手柄，组内顺序见各目录的
+`__init__.py`。同一台设备被多条链路命中时，`scanner` 会按 score() 保留一条。
 """
 from __future__ import annotations
 
@@ -18,42 +28,12 @@ import time
 from model import Device
 from providers import hidlist
 from providers.hidpath import is_bluetooth, phys_token
-from providers.packs import (
-    ajazz, akg, asus, atk, aula, base, betop, cherry, darkrim, eweadn, gamesir,
-    ganss, haute, hecate, hyperx_cf2, inphic_delux, lingbao, mchose, mojhon,
-    pulsar, rapoo, razer, sony, thunderobot, vgn,
-)
+from providers.packs import base, gamepad, headset, keyboard, mouse
 
-# 顺序 = 优先级。被动听/轻查询的排前面，要发多条帧的排后面。
-# 共用 VID:PID 的家族（3554:FA09 的 AULA / 凌豹 / 迈从）靠"先试谁能自证"排序：
-# 先试的会在型号/固件不符时主动让位。
-# 本工具只做 2.4G 与 USB 有线：蓝牙链路（如 DualSense 蓝牙报告）一律不接。
-PACKS = (
-    inphic_delux,       # 1D57:FA65 被动
-    hecate,             # 35BB:D00B 被动 + 一条查询
-    rapoo,              # 24AE 被动 0x07 状态帧
-    hyperx_cf2,         # 03F0:0AC1 被动状态流
-    aula,               # 3554:FA09 / 38A6 G9 被动 + L9 查询 + HERO 68 分片
-    darkrim,            # 3654:6901 GetBasicInfo
-    gamesir,            # 3537 心跳 + 状态流
-    cherry,             # 046A 块读
-    pulsar,             # 3554:F508 17 字节
-    ajazz,              # 3151:4011 feature F7
-    lingbao,            # 3151:402D feature F7 + 3554:FA09 K98 会话
-    thunderobot,        # 369B:0234 TLV
-    eweadn,             # 0C45:FEFE / 372E:1026
-    asus,               # 0B05:1ACE / 1AFA
-    razer,              # 1532 四条链路
-    mchose,             # 3837 七条链路 + 3554:FA09 共用指纹
-    vgn,                # 391D / 3554:FB56 / 320F
-    atk,                # 373B 鼠标 17 字节 + VIA 键盘
-    betop,              # 20BC / 20DD
-    ganss,              # 05AC:024F 33 字节
-    akg,                # 0ECB:20D9 RACE
-    haute,              # 054C:0CE6 适配器（只读 feature，不做蓝牙）
-    sony,               # 054C:0FA8 INZONE H9 II 接收器
-    mojhon,             # E2B7 A5 寄存器
-)
+# 四个类型的顺序与各自组内顺序，合起来就是全局优先级。
+# 不同类型之间的判据互斥（VID:PID 或接口指纹不同），所以组间顺序只影响
+# "先试哪一类"，不影响正确性；会抢同一只接收器的链路都排在同一个类型里。
+PACKS = mouse.MODULES + keyboard.MODULES + headset.MODULES + gamepad.MODULES
 
 # 整个通道的预算。超了就不再开新设备：宁可这一轮少认一台，
 # 也不要把一次刷新拖成十几秒。

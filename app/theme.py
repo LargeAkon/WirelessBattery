@@ -325,6 +325,40 @@ def qss() -> str:
         font-size: 12px;
         color: {TEXT_SUB};
     }}
+    #DiagStep {{
+        font-size: 13px;
+        color: {TEXT_SUB};
+    }}
+    /* 主操作按钮：诊断页只有这一个动作，用实心墨块顶在最显眼处 */
+    QPushButton#Primary {{
+        background: {INK};
+        color: {ON_INK};
+        border: none;
+        border-radius: 9px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 7px 18px;
+    }}
+    QPushButton#Primary:hover {{
+        background: {TEXT_DIM};
+        color: {ON_INK};
+    }}
+    QPushButton#Primary:disabled {{
+        background: {INK_SOFT};
+        color: {TEXT_SUB};
+    }}
+    /* 细进度条：只是告诉人"还在动"，不抢视线 */
+    QProgressBar#DiagBar {{
+        border: none;
+        border-radius: 2px;
+        background: {TRACK};
+        max-height: 4px;
+        min-height: 4px;
+    }}
+    QProgressBar#DiagBar::chunk {{
+        border-radius: 2px;
+        background: {INK};
+    }}
     QGroupBox {{
         border: 1px solid {STROKE};
         border-radius: 10px;

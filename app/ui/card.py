@@ -389,7 +389,10 @@ class CardWindow(QWidget):
 
         self.empty_label.setVisible(not devices)
         if not devices:
-            self.empty_label.setText(error or "未检测到无线外设")
+            # 空列表是用户放弃率最高的地方：这里给一句"下一步点哪里"，
+            # 比只写"未检测到"有用得多。
+            self.empty_label.setText(
+                error or "未检测到无线外设\n右键托盘图标 → 设备诊断，可自动查找")
 
         self._relayout()
         if self.isVisible():

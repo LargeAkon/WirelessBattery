@@ -1,45 +1,71 @@
 # -*- coding: utf-8 -*-
-"""设备诊断：看清每一条 HID 通道，并把任意新设备接进来。
+"""设备诊断：一个按钮，自动把能读到的设备都找出来。
 
-流程（做过简化：原来要"选端点 → 嗅探 → 手填名称类型 → 存规则"四步）：
-    1. 上方看当前已经识别到的设备；
-    2. 中间端点表，找到有用的那一行，点右侧「复制」；
-    3. 下方粘贴 → 点「识别」，程序自动定位端点、自动读电量、自动存规则。
+旧版是一张端点表 + 复制 + 粘贴 + 识别，要求用户先看懂"页面 0xFF00、
+用法 0x0002"才知道该复制哪一行 —— 实际反馈是绝大多数人卡在这一步。
+现在页面只留一个动作：
+
+    [ 开始自动诊断 ]  →  进度条走动 + 底部「识别中，请勿关闭」
+                     →  上面列出读到的设备，下面列出读不到的和原因
+
+读不到的仍然可以「导出诊断报告」，但那是备用通道，不再是使用前提。
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QStandardPaths, QThread, Signal
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableWidget,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QProgressBar, QPushButton, QScrollArea, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+import autodiag
 import theme
 from config import APP_VERSION, Config
 from model import Device
 from providers import raw_hid, xinput_pad
-from recognize import endpoint_text, recognize
 from vendors import describe as describe_vendor
 
 
-class RecognizeWorker(QThread):
-    """识别流程里有 HID 握手和 3 秒被动监听，必须离开 UI 线程。"""
+class AutoDiagWorker(QThread):
+    """扫描 + 被动监听都在这里跑，UI 线程只负责画进度。"""
 
+    progress = Signal(str, int)
     done = Signal(dict)
 
-    def __init__(self, text: str, parent=None):
+    def __init__(self, config: Config, mode: str = "diag", parent=None):
         super().__init__(parent)
-        self.text = text
+        self.config = config
+        self.mode = mode
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
 
     def run(self) -> None:
         try:
-            result = recognize(self.text)
+            result = autodiag.run(
+                self.config,
+                progress=lambda text, pct: self.progress.emit(text, pct),
+                stop=self._stop,
+            )
+            if self.mode == "report":
+                result["endpoints_list"] = raw_hid.describe_endpoints()
+                try:
+                    result["xinput"] = xinput_pad.describe()
+                except Exception as exc:
+                    result["xinput"] = [f"XInput 读取失败: {type(exc).__name__}: {exc}"]
         except Exception as exc:
-            result = {"ok": False, "message": f"识别失败：{type(exc).__name__}: {exc}"}
+            result = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "devices": [], "failed": [], "rules": 0,
+                "endpoints": 0, "seconds": 0.0, "logs": [],
+            }
+        result["mode"] = self.mode
         self.done.emit(result)
 
 
@@ -68,9 +94,11 @@ def _style_table(t: QTableWidget) -> None:
     t.verticalHeader().setPalette(pal)
 
 
-def _cell(value: str, dim: bool = False) -> QTableWidgetItem:
+def _cell(value: str, dim: bool = False, right: bool = False) -> QTableWidgetItem:
     item = QTableWidgetItem(value)
     item.setForeground(theme.color(theme.TEXT_DIM if dim else theme.TEXT))
+    if right:
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
     return item
 
 
@@ -87,6 +115,7 @@ def _table(headers: list[str]) -> QTableWidget:
     t.setFocusPolicy(Qt.NoFocus)
     t.setFrameShape(QTableWidget.NoFrame)
     t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    t.setWordWrap(False)
     t.horizontalHeader().setStretchLastSection(False)
     t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
     _style_table(t)
@@ -99,18 +128,18 @@ class DiagWindow(QWidget):
     def __init__(self, config: Config):
         super().__init__(None)
         self.config = config
-        self.endpoints: list[dict] = []
-        self._worker: RecognizeWorker | None = None
+        self._worker: AutoDiagWorker | None = None
+        self._running = False
         self._devices: list[Device] = []
         self._debug: list[str] = []
+        self._result: dict | None = None
 
-        self.setWindowTitle("设备诊断与规则")
-        self.setMinimumSize(780, 560)
+        self.setWindowTitle("设备诊断")
+        self.setMinimumSize(700, 500)
         self.setObjectName("DiagRoot")
         self.setStyleSheet(theme.qss())
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
 
-        # 内容放进滚动区：窗口可以矮，内容永远不被压缩
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -130,289 +159,236 @@ class DiagWindow(QWidget):
         outer.addWidget(self.scroll)
 
         root = QVBoxLayout(content)
-        root.setContentsMargins(18, 16, 18, 16)
+        root.setContentsMargins(18, 16, 18, 14)
         root.setSpacing(12)
 
-        self.head = QLabel("设备诊断与规则")
+        # ---------- 顶部：标题 + 唯一按钮 ----------
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        self.head = QLabel("设备诊断")
         self.head.setObjectName("DiagTitle")
-        root.addWidget(self.head)
-        self.tip = QLabel("中间表格只复制标 ★ 的那一行，粘到下面点识别，程序自己认端点、自己读电量。")
-        self.tip.setObjectName("DiagTip")
-        self.tip.setWordWrap(True)
-        root.addWidget(self.tip)
+        header.addWidget(self.head)
+        header.addStretch(1)
+        self.btn = QPushButton("开始自动诊断")
+        self.btn.setObjectName("Primary")
+        self.btn.setCursor(Qt.PointingHandCursor)
+        self.btn.setFixedHeight(34)
+        self.btn.clicked.connect(self._start)
+        header.addWidget(self.btn)
+        root.addLayout(header)
 
-        # ---------- 一、已识别设备（最上方） ----------
-        dev_box = QGroupBox("当前识别到的外设")
-        dev_lay = QVBoxLayout(dev_box)
-        self.dev_table = _table(["设备", "类型", "电量", "来源通道", "连接"])
-        self.dev_table.setFixedHeight(120)
-        dev_lay.addWidget(self.dev_table)
-        root.addWidget(dev_box)
+        self.bar = QProgressBar()
+        self.bar.setObjectName("DiagBar")
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(4)
+        self.bar.hide()
+        root.addWidget(self.bar)
 
-        # ---------- 二、HID 端点（中间，右侧复制按钮） ----------
-        ep_box = QGroupBox("HID 端点")
-        ep_lay = QVBoxLayout(ep_box)
-        self.ep_table = _table(["厂商:产品", "设备名", "页面/用法", "用途", "接口", "复制"])
-        self.ep_table.setFixedHeight(210)
-        self.ep_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
-        self.ep_table.setColumnWidth(5, 64)
-        self.ep_table.itemSelectionChanged.connect(self._on_endpoint_pick)
-        ep_lay.addWidget(self.ep_table)
-        self.ep_tip = QLabel(
-            "★ 是厂商协议通道，电量只从这里出来；鼠标 / 键盘 / 多媒体那几行只是输入报文。"
-            "整张表都没有 ★ 时，复制「厂商协议」那几行逐条试。")
-        self.ep_tip.setObjectName("DiagTip")
-        self.ep_tip.setWordWrap(True)
-        ep_lay.addWidget(self.ep_tip)
-        root.addWidget(ep_box)
+        # ---------- 结果 / 识别中 ----------
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
 
-        # ---------- 三、粘贴识别 ----------
-        rec_box = QGroupBox("识别并添加设备")
-        rec_lay = QVBoxLayout(rec_box)
-        rec_row = QHBoxLayout()
-        self.paste_edit = QLineEdit()
-        self.paste_edit.setPlaceholderText(
-            "把上面「复制」得到的端点信息粘贴到这里，例如 046D:C54D | USB Receiver | 页面=0xFF00 用法=0x0002 …")
-        self.paste_edit.returnPressed.connect(self._recognize)
-        rec_row.addWidget(self.paste_edit, 1)
-        self.rec_btn = QPushButton("识别")
-        self.rec_btn.setObjectName("Ghost")
-        self.rec_btn.setFixedHeight(30)
-        self.rec_btn.setFixedWidth(78)
-        self.rec_btn.clicked.connect(self._recognize)
-        rec_row.addWidget(self.rec_btn)
-        rec_lay.addLayout(rec_row)
-        self.rec_result = QLabel("")
-        self.rec_result.setObjectName("DiagStatus")
-        self.rec_result.setWordWrap(True)
-        rec_lay.addWidget(self.rec_result)
-        root.addWidget(rec_box)
+        page_results = QWidget()
+        res_lay = QVBoxLayout(page_results)
+        res_lay.setContentsMargins(0, 0, 0, 0)
+        res_lay.setSpacing(6)
 
-        # ---------- 四、导出 ----------
-        export_row = QHBoxLayout()
+        self.dev_label = QLabel("识别到的设备")
+        self.dev_label.setObjectName("SectionLabel")
+        res_lay.addWidget(self.dev_label)
+
+        self.dev_table = _table(["设备", "类型", "电量", "读取方式"])
+        self.dev_table.setMinimumHeight(150)
+        self.dev_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.dev_table.setColumnWidth(2, 76)
+        res_lay.addWidget(self.dev_table, 1)
+
+        self.fail_label = QLabel("没能读取")
+        self.fail_label.setObjectName("SectionLabel")
+        self.fail_label.hide()
+        res_lay.addWidget(self.fail_label)
+
+        self.fail_table = _table(["设备", "编号", "原因"])
+        self.fail_table.setMinimumHeight(96)
+        self.fail_table.setWordWrap(True)
+        self.fail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.fail_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.fail_table.setColumnWidth(0, 190)
+        self.fail_table.setColumnWidth(1, 88)
+        self.fail_table.hide()
+        res_lay.addWidget(self.fail_table)
+        self.stack.addWidget(page_results)
+        self._page_results = page_results
+
+        page_busy = QWidget()
+        busy_lay = QVBoxLayout(page_busy)
+        busy_lay.setContentsMargins(0, 0, 0, 0)
+        busy_lay.addStretch(1)
+        self.step = QLabel("正在识别…")
+        self.step.setObjectName("DiagStep")
+        self.step.setAlignment(Qt.AlignCenter)
+        self.step.setWordWrap(True)
+        busy_lay.addWidget(self.step)
+        busy_lay.addStretch(1)
+        self.stack.addWidget(page_busy)
+        self._page_busy = page_busy
+
+        # ---------- 底部：导出 + 状态 ----------
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
         self.export_btn = QPushButton("导出诊断报告")
         self.export_btn.setObjectName("Ghost")
-        self.export_btn.setFixedHeight(32)
-        self.export_btn.clicked.connect(self._export_report)
-        export_row.addWidget(self.export_btn)
-        self.export_tip = QLabel("别人那边读不到设备时，让他导出这个 txt 发回来")
-        self.export_tip.setObjectName("DiagTip")
-        export_row.addWidget(self.export_tip, 1)
-        root.addLayout(export_row)
-
+        self.export_btn.setCursor(Qt.PointingHandCursor)
+        self.export_btn.setFixedHeight(26)
+        self.export_btn.clicked.connect(self._export)
+        bottom.addWidget(self.export_btn)
+        bottom.addStretch(1)
         self.status = QLabel("")
         self.status.setObjectName("DiagStatus")
-        root.addWidget(self.status)
+        bottom.addWidget(self.status)
+        root.addLayout(bottom)
 
-        self.refresh_endpoints()
+        self.update_devices([], [])
 
         hint = content.sizeHint()
         avail = QGuiApplication.primaryScreen().availableGeometry()
         self.resize(
-            max(780, hint.width()),
-            min(hint.height(), max(560, int(avail.height() * 0.88))),
+            max(700, min(hint.width() + 40, 860)),
+            min(max(500, hint.height() + 24), int(avail.height() * 0.88)),
         )
+
+    # ---------------- 状态切换 ----------------
+    @property
+    def busy(self) -> bool:
+        # 用显式标志而不是 QThread.isRunning()：done 信号可能在线程真正
+        # 结束前一瞬到达，那时 isRunning() 还是 True，按钮会被误判成"忙"。
+        return self._running
+
+    def _set_busy(self, busy: bool, text: str = "") -> None:
+        self.btn.setEnabled(not busy)
+        self.btn.setText("识别中…" if busy else "开始自动诊断")
+        self.export_btn.setEnabled(not busy)
+        self.bar.setVisible(busy)
+        if busy:
+            self.bar.setValue(0)
+            self.step.setText(text or "正在识别…")
+            self.stack.setCurrentWidget(self._page_busy)
+        else:
+            self.stack.setCurrentWidget(self._page_results)
+            self.bar.setValue(100)
+
+    def _on_progress(self, text: str, pct: int) -> None:
+        self.bar.setValue(max(0, min(100, int(pct))))
+        self.step.setText(text)
+        self.status.setText("识别中，请勿关闭…")
 
     # ---------------- 主题 ----------------
     def apply_theme(self) -> None:
-        """主题切换后重建样式：诊断页的表格吃 palette，光换 qss 不够。"""
+        """主题切换后重建样式：表格吃 palette，光换 qss 不够。"""
         self.setStyleSheet(theme.qss())
-        for table in (self.dev_table, self.ep_table):
+        for table in (self.dev_table, self.fail_table):
             _style_table(table)
             for row in range(table.rowCount()):
-                for col in range(5):
+                for col in range(table.columnCount()):
                     item = table.item(row, col)
-                    if item is not None and not item.font().bold():
+                    if item is not None:
                         item.setForeground(theme.color(theme.TEXT))
         self.update()
 
-    # ---------------- 数据 ----------------
-    def refresh_endpoints(self) -> None:
-        self.endpoints = raw_hid.describe_endpoints()
-        self.ep_table.setRowCount(len(self.endpoints))
-        first_recommend = -1
-        for i, ep in enumerate(self.endpoints):
-            values = [
-                f"{ep['vendor_id']:04X}:{ep['product_id']:04X}",
-                ep.get("product") or "-",
-                f"0x{(ep['usage_page'] or 0):04X} / 0x{(ep['usage'] or 0):04X}",
-                ep.get("role") or "-",
-                "-" if (ep["interface"] is None or ep["interface"] < 0)
-                else str(ep["interface"]),
-            ]
-            for j, v in enumerate(values):
-                item = _cell(v)
-                if ep.get("recommend"):
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                    item.setForeground(theme.color(theme.ACCENT))
-                self.ep_table.setItem(i, j, item)
+    # ---------------- 运行 ----------------
+    def _start(self) -> None:
+        self._run("diag")
 
-            btn = QPushButton("复制")
-            btn.setObjectName("Ghost")
-            btn.setFixedHeight(24)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, e=ep: self._copy_endpoint(e))
-            self.ep_table.setCellWidget(i, 5, btn)
-
-            if ep.get("recommend") and first_recommend < 0:
-                first_recommend = i
-
-        self.status.setText(f"共 {len(self.endpoints)} 个 HID 端点")
-        if first_recommend >= 0:
-            self.ep_table.selectRow(first_recommend)
-            self.ep_table.scrollToItem(self.ep_table.item(first_recommend, 0))
-
-    def _on_endpoint_pick(self) -> None:
-        ep = self._selected_endpoint()
-        if not ep:
+    def _run(self, mode: str) -> None:
+        if self.busy:
             return
-        if (ep.get("usage_page") or 0) < 0xFF00:
-            self.ep_tip.setText(
-                f"当前选中的是「{ep.get('role')}」端点，它本身只上报输入动作；"
-                "识别时程序仍会按厂商再试一次，失败了就改复制标 ★ 的那一行。")
-        else:
-            self.ep_tip.setText(
-                "★ 是厂商协议通道，电量只从这里出来；鼠标 / 键盘 / 多媒体那几行只是输入报文。"
-                "整张表都没有 ★ 时，复制「厂商协议」那几行逐条试。")
-
-    def _selected_endpoint(self) -> dict | None:
-        row = self.ep_table.currentRow()
-        if row < 0 or row >= len(self.endpoints):
-            return None
-        return self.endpoints[row]
-
-    def update_devices(self, devices: list[Device], debug: list[str]) -> None:
-        self._devices = list(devices or [])
-        if debug:
-            self._debug = list(debug)
-        self.dev_table.setRowCount(len(devices))
-        for i, d in enumerate(devices):
-            values = [d.name, d.type_label, f"{d.percent_text}%",
-                      d.source or "-", d.transport or "-"]
-            for j, v in enumerate(values):
-                self.dev_table.setItem(i, j, _cell(v))
-        if not devices:
-            self.dev_table.setRowCount(1)
-            self.dev_table.setItem(0, 0, _cell("（未识别到带电量信息的外设）", dim=True))
-
-    # ---------------- 复制 ----------------
-    def _copy_endpoint(self, ep: dict) -> None:
-        text = endpoint_text(ep)
-        QGuiApplication.clipboard().setText(text)
-        # 顺手填进下面的输入框：用户连粘贴都不用做，直接点识别
-        self.paste_edit.setText(text)
-        self.paste_edit.setCursorPosition(0)
-        self.rec_result.setText(f"已复制并填入：{ep.get('product') or '-'} "
-                                f"{ep.get('role') or ''}，点「识别」即可。")
-        self.paste_edit.setFocus()
-        self.paste_edit.selectAll()
-
-    # ---------------- 识别 ----------------
-    def _recognize(self) -> None:
-        if self._worker and self._worker.isRunning():
-            return
-        text = self.paste_edit.text().strip()
-        if not text:
-            self.rec_result.setText("先复制一行端点信息粘进来。")
-            return
-        self.rec_btn.setEnabled(False)
-        self.rec_btn.setText("识别中…")
-        self.rec_result.setText("正在定位端点并读取电量…")
-        self._worker = RecognizeWorker(text)
-        self._worker.done.connect(self._on_recognized)
+        self._running = True
+        self._set_busy(True, "正在识别…")
+        self.status.setText("识别中，请勿关闭…")
+        self._worker = AutoDiagWorker(self.config, mode=mode)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.done.connect(self._on_done)
         self._worker.start()
 
-    def _on_recognized(self, result: dict) -> None:
-        self.rec_btn.setEnabled(True)
-        self.rec_btn.setText("识别")
-        debug = result.get("debug") or []
-        if debug:
-            self._debug.extend(debug)
+    def _on_done(self, result: dict) -> None:
+        self._running = False
+        self._set_busy(False)
+        self._result = result
 
-        if not result.get("ok"):
-            self.rec_result.setText(result.get("message") or "识别失败。")
-            self.status.setText("识别失败")
+        if result.get("error"):
+            self.status.setText(f"诊断失败：{result['error']}")
             return
 
-        device: Device = result["device"]
-        rule = result.get("rule")
-        if rule:
-            self._save_rule(rule)
+        debug = result.get("logs") or []
+        if debug:
+            self._debug = debug
+        self.update_devices(result.get("devices") or [], [])
 
-        # 立刻把它显示到上方表格，不用等下一轮扫描
-        merged = [d for d in self._devices if d.key != device.key] + [device]
-        self.update_devices(merged, [])
+        if result.get("mode") == "report":
+            self._write_report(result)
+            return
 
-        extra = ""
-        if not rule and (device.source or "").startswith(("HID++", "Evision")):
-            extra = "（该品牌有内置通道，无需规则，以后刷新自动读取）"
-        self.rec_result.setText(f"{result.get('message') or '已识别'}{extra}")
-        self.status.setText("识别成功")
+        self.status.setText(autodiag.summary(result))
+        # 诊断结果要立刻反映到卡片上：本轮的规则已经写进配置，
+        # 让主窗口重新扫一遍就能出现在列表里。
         self.rule_changed.emit()
 
-    def _save_rule(self, rule: dict) -> None:
-        rules = list(self.config.get("custom_rules") or [])
-        m = rule.get("match") or {}
-        rules = [r for r in rules if not _same_match(r.get("match") or {}, m)]
-        rules.append(rule)
-        self.config.set("custom_rules", rules)
+    # ---------------- 表格 ----------------
+    def update_devices(self, devices: list[Device], debug: list[str]) -> None:
+        if self.busy:
+            # 自动诊断跑着的时候，主窗口的定时刷新不要来抢表格
+            return
+        if debug:
+            self._debug = list(debug)
+        devices = sorted(devices or [], key=lambda d: d.sort_key())
+        self._devices = devices
 
-    # ---------------- 诊断报告 ----------------
-    def _export_report(self) -> None:
-        """把当前能采集到的全部信息写成一份 txt。
+        self.dev_label.setText(f"识别到的设备 · {len(devices)}")
+        self.dev_table.setRowCount(max(1, len(devices)))
+        if not devices:
+            self.dev_table.setItem(0, 0, _cell("暂无", dim=True))
+            for col in (1, 2, 3):
+                self.dev_table.setItem(0, col, _cell("", dim=True))
+        else:
+            for i, d in enumerate(devices):
+                pct = f"{d.percent_text}%"
+                if d.charging:
+                    pct += " · 充电中"
+                values = [d.name, d.type_label, pct, d.source or "-"]
+                for j, v in enumerate(values):
+                    self.dev_table.setItem(i, j, _cell(v, right=(j == 2)))
 
-        软件发给别人后，他那台读不到设备时，一句"导出报告发我"就能定位：
-        报告里带每个 HID 端点、每个系统电池设备的实例 ID、读数状态和失败原因，
-        不需要再靠来回猜型号。
-        """
+        failed = (self._result or {}).get("failed") or []
+        if failed:
+            self.fail_label.show()
+            self.fail_table.show()
+            self.fail_label.setText(f"没能读取 · {len(failed)}")
+            self.fail_table.setRowCount(len(failed))
+            for i, row in enumerate(failed):
+                self.fail_table.setItem(i, 0, _cell(row.get("name") or "-"))
+                self.fail_table.setItem(i, 1, _cell(row.get("vid_pid") or "-", dim=True))
+                self.fail_table.setItem(i, 2, _cell(row.get("reason") or "-", dim=True))
+            self.fail_table.resizeRowsToContents()
+        else:
+            self.fail_label.hide()
+            self.fail_table.hide()
+
+    # ---------------- 导出 ----------------
+    def _export(self) -> None:
+        """导出前同样跑一遍自动诊断：报告里就有失败原因和原始帧。"""
+        self._debug = []
+        self._run("report")
+
+    def _write_report(self, result: dict) -> None:
         import platform
         from datetime import datetime
 
         from config import config_dir
-        from scanner import Scanner
 
-        self.status.setText("正在收集诊断信息…")
-        QGuiApplication.processEvents()
-
-        devices: list[Device] = []
-        debug: list[str] = []
-        try:
-            devices, debug = Scanner(self.config).scan(with_debug=True, force=True)
-        except Exception as exc:
-            debug = [f"扫描异常: {type(exc).__name__}: {exc}"]
-
-        eps = raw_hid.describe_endpoints()
-        self.endpoints = eps
-
-        # ★ 端点各听 1.5 秒：私有协议的报文字段光看端点表是推不出来的，
-        # 报告里带上原始帧，下一次就不用再让用户跑一遍。
-        samples: list[str] = []
-        targets = [ep for ep in eps if ep.get("recommend")][:4]
-        for ep in targets:
-            head = (f"{ep['vendor_id']:04X}:{ep['product_id']:04X} "
-                    f"页=0x{(ep['usage_page'] or 0):04X} 用法=0x{(ep['usage'] or 0):04X} "
-                    f"接口={ep['interface']}")
-            self.status.setText(f"正在采样 {head.split()[0]}…")
-            QGuiApplication.processEvents()
-            try:
-                res = raw_hid.sniff_candidates(ep["path"], 1.5, "")
-            except Exception as exc:
-                samples.append(f"{head} → 采样异常: {type(exc).__name__}: {exc}")
-                continue
-            if res.get("error"):
-                samples.append(f"{head} → {res['error']}")
-                continue
-            if not res.get("total"):
-                samples.append(f"{head} → 1.5 秒内无上报（设备可能休眠，或该端点只应答查询）")
-                continue
-            samples.append(f"{head} → {res['total']} 帧")
-            for rid, hex_text in res.get("reports", [])[:8]:
-                samples.append(f"    rid={rid}  {hex_text}")
-        if not targets:
-            samples.append("（没有可采样的厂商端点：这台机器上没枚举到 2.4G 接收器的私有通道）")
-
+        devices = result.get("devices") or []
+        eps = result.get("endpoints_list") or []
         lines: list[str] = [
             "外设电量 · 诊断报告",
             "=" * 46,
@@ -433,10 +409,19 @@ class DiagWindow(QWidget):
         else:
             lines.append("（无）")
 
-        lines += ["", "【二、XInput 槽位】手柄走 XInput 时只有四档，这里看原始值"]
-        lines.extend(xinput_pad.describe())
+        failed = result.get("failed") or []
+        lines += ["", f"【二、没读到的接收器】共 {len(failed)} 台"]
+        if failed:
+            for row in failed:
+                lines.append(f"{row.get('vid_pid') or '-'} | {row.get('name') or '-'} "
+                             f"| {row.get('reason') or '-'}")
+        else:
+            lines.append("（无）")
 
-        lines += ["", f"【三、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
+        lines += ["", "【三、XInput 槽位】手柄走 XInput 时只有四档，这里看原始值"]
+        lines.extend(result.get("xinput") or ["（未采集）"])
+
+        lines += ["", f"【四、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
         for ep in eps:
             lines.append(
                 f"{ep['vendor_id']:04X}:{ep['product_id']:04X} | "
@@ -446,10 +431,12 @@ class DiagWindow(QWidget):
                 f"{'★ ' if ep.get('recommend') else ''}{ep.get('role') or '-'} | "
                 f"接口={ep['interface']}")
 
-        lines += ["", "【四、厂商端点被动采样】每个 ★ 端点听 1.5 秒，原样记录上报帧"]
-        lines.extend(samples)
+        debug = result.get("logs") or self._debug
+        samples = result.get("samples") or []
+        lines += ["", "【五、厂商端点被动采样】每个候选端点听 2 秒，原样记录上报帧"]
+        lines.extend(samples or ["（没有可采样的厂商端点）"])
 
-        lines += ["", f"【五、扫描日志】共 {len(debug)} 行"]
+        lines += ["", f"【六、扫描日志】共 {len(debug)} 行"]
         lines.extend(debug or ["（无）"])
         lines += ["", "=" * 46, "请把本文件整份发回，内容越多越好，不要删减。"]
 
@@ -464,19 +451,14 @@ class DiagWindow(QWidget):
             self.status.setText("导出失败")
             return
 
-        self._devices = devices
-        self._debug = debug
-        self.update_devices(devices, debug)
         self.status.setText(f"已导出：{path}")
         QMessageBox.information(
             self, "诊断报告已导出",
             f"已保存到：\n{path}\n\n把这个 txt 整份发回来即可定位问题。")
 
-
-def _same_match(a: dict, b: dict) -> bool:
-    return (
-        a.get("vendor_id") == b.get("vendor_id")
-        and a.get("product_id") == b.get("product_id")
-        and a.get("usage_page") == b.get("usage_page")
-        and a.get("usage") == b.get("usage")
-    )
+    # ---------------- 关闭 ----------------
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(3000)
+        super().closeEvent(event)

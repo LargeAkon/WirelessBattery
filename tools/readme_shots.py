@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成 README 配图：卡片（浅/深）、诊断窗口、托盘图标一览。
+"""生成 README 配图：卡片（浅/深）、托盘图标一览。
 
 用法（在项目根目录）：
     python tools/readme_shots.py
@@ -25,7 +25,6 @@ from config import Config  # noqa: E402
 from model import Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE  # noqa: E402
 from ui import icons  # noqa: E402
 from ui.card import CardWindow  # noqa: E402
-from ui.diag import DiagWindow  # noqa: E402
 
 OUT = ROOT / "docs"
 
@@ -58,20 +57,6 @@ def shot_card(mode: str, name: str) -> None:
     win.grab().save(str(OUT / name))
     win.close()
     print("card   ->", name)
-
-
-def shot_diag() -> None:
-    _prep("light")
-    win = DiagWindow(Config())
-    win.setAttribute(Qt.WA_DontShowOnScreen, True)
-    win.resize(880, 780)
-    win.show()
-    QTest.qWait(1200)
-    win.update_devices(SAMPLE[:2], [])
-    QTest.qWait(600)
-    win.grab().save(str(OUT / "diag.png"))
-    win.close()
-    print("diag   -> diag.png")
 
 
 def shot_tray() -> None:
@@ -126,7 +111,6 @@ def main() -> None:
     QApplication([])
     shot_card("light", "card-light.png")
     shot_card("dark", "card.png")
-    shot_diag()
     shot_tray()
     print("全部写入", OUT)
 

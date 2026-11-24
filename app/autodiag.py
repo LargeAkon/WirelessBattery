@@ -5,17 +5,16 @@
 对只想看电量的普通用户门槛太高 —— 他们连哪一行该复制都判断不了。
 这里改成一条流水线，点一下跑完：
 
-    1. 把已实现的读取通道全跑一遍（HID++ / Evision / 芯片组 / 标准 HID /
-       XInput / 系统电池 / 已有规则）；
+    1. 把已实现的读取通道全跑一遍（协议包 / Evision / HID++ / HyperX / 芯片组 /
+       已添加协议）；
     2. 枚举当前所有 HID 端点，按接收器分组，挑出还没读到电量的那些；
-    3. 对每台没读到的接收器，在它的厂商端点上被动听 2 秒，
-       找到"稳定落在 1~100"的字节就自动存成规则、直接加进列表；
-    4. 读不到的把原因留下（端点被占用 / 没有任何上报 / 有上报但找不到电量字节），
-       界面只显示这一句，用户照着回一句就行。
+    3. 给每台没读到的写清原因：没有厂商端点、或者有端点但内置协议没匹配上，
+       后一种直接在「添加设备」里选型号试读；
+    4. 顺手把图标落成"未知"的设备按标准集合补上类型。
 
 两条硬约束：
-- 全程不做主动盲写。私有协议帧格式猜错可能让接收器掉线（Rainy75 那次已经
-  验证过风险），所以只被动听，不往未知端点乱发命令。
+- 不往未知端点发任何命令。私有协议帧格式猜错可能让接收器掉线（Rainy75 那次
+  已经验证过风险），所以诊断只做读、只做解释。
 - 找不到就写"没找到"，绝不拿一个凑出来的百分比充数。
 """
 from __future__ import annotations
@@ -29,8 +28,6 @@ from model import UNKNOWN, Device
 from providers import hidlist, raw_hid
 from providers.oem import _kind as _oem_kind
 
-PROBE_SECONDS = 2.0   # 每台接收器被动听多久
-MAX_PROBES = 8        # 一次最多听几台，避免插一排接收器时一直转圈
 
 # 接收器会挂这些标准集合，电影摄像头 / 音频设备不会。
 _PERIPHERAL = {
@@ -145,37 +142,6 @@ def _kind_of(eps: list[dict], name: str) -> str:
     return _oem_kind(members, name)
 
 
-def _same_match(a: dict, b: dict) -> bool:
-    return all(a.get(k) == b.get(k)
-               for k in ("vendor_id", "product_id", "usage_page", "usage"))
-
-
-def _save_rule(config, rule: dict) -> bool:
-    """存规则。同一组端点已经存过就覆盖，避免每次诊断叠一条。"""
-    rules = list(config.get("custom_rules") or [])
-    match = rule.get("match") or {}
-    kept = [r for r in rules if not _same_match(r.get("match") or {}, match)]
-    kept.append(rule)
-    config.set("custom_rules", kept)
-    return len(kept) != len(rules)
-
-
-def _pick_candidate(res: dict) -> dict | None:
-    """从被动采到的字节里挑一个最像电量的。
-
-    判据和人工识别时一致：稳定不跳、样本至少 3 条、取值落在 1~100。
-    """
-    cands = [c for c in (res.get("candidates") or [])
-             if c.get("stable") and c.get("samples", 0) >= 3
-             and 1 <= (c.get("value") or 0) <= 100]
-    if not cands:
-        return None
-    # 同一帧里可能有多个稳定的小整数（模式位、通道号），电量一般是其中最大
-    # 的那个百分比；取值相同时取靠前的字节。这条判据与人工识别时一致。
-    cands.sort(key=lambda c: (-c.get("value", 0), c.get("byte", 0)))
-    return cands[0]
-
-
 def _fix_kinds(devices: list[Device], groups: dict[str, list[dict]]) -> int:
     """图标落成"未知"的，用同一只接收器的标准集合补上类型。"""
     fixed = 0
@@ -203,16 +169,13 @@ def run(config, progress: Progress | None = None,
     result: dict = {
         "devices": [],      # 读到电量的设备（含本次自动加进来的）
         "failed": [],       # 有端点但读不到：[{name, vid_pid, reason}]
-        "rules": 0,         # 本次新存下的规则条数
         "fixed": 0,         # 补全类型的设备数
         "endpoints": 0,
         "receivers": 0,
         "seconds": 0.0,
         "logs": [],
-        "samples": [],      # 被动采样到的原始帧，导出报告用
         "stopped": False,
     }
-    samples: list[str] = result["samples"]
 
     if stop is not None and stop.is_set():
         result["stopped"] = True
@@ -243,115 +206,22 @@ def run(config, progress: Progress | None = None,
             return result
 
         # ---------- 还没读到的接收器 ----------
+        # 这里只解释原因，不再被动嗅探、也不再自动存规则：
+        # 逐型号/按芯片方案的读取都在 providers 里，猜出来的字节没有验证过，
+        # 给了反而是个会跳的假读数。需要补协议的去「添加设备」手动试读。
         known = _known_vidpids(devices)
-        pending: list[tuple[str, list[dict]]] = []
         for vid_pid, group_eps in groups.items():
-            if vid_pid.upper() in known:
+            if vid_pid.upper() in known or not _is_candidate(group_eps):
                 continue
-            if not _is_candidate(group_eps):
-                continue
-            pending.append((vid_pid, group_eps))
-        result["receivers"] = len(pending)
-
-        todo = pending[:MAX_PROBES]
-        skipped = pending[MAX_PROBES:]
-        for index, (vid_pid, group_eps) in enumerate(todo):
-            if stop is not None and stop.is_set():
-                result["stopped"] = True
-                break
             name = _display_name(group_eps, vid_pid)
-            pct = 30 + int(60 * index / max(1, len(todo)))
-            _say(progress, f"正在识别 {name}（{index + 1}/{len(todo)}）…", pct)
-
-            vendor = _vendor_eps(group_eps)
-            if not vendor:
-                result["failed"].append({
-                    "name": name,
-                    "vid_pid": vid_pid,
-                    "reason": "只有标准输入端点，没有厂商协议端点（这类设备不对外报电量）",
-                })
-                continue
-
-            hit = None
-            error = ""
-            no_report = True
-            for ep in vendor[:2]:
-                try:
-                    res = raw_hid.sniff_candidates(ep["path"], PROBE_SECONDS, "")
-                except Exception as exc:
-                    error = f"{type(exc).__name__}: {exc}"
-                    continue
-                if res.get("error"):
-                    error = res["error"]
-                    samples.append(f"{vid_pid} 页=0x{(ep.get('usage_page') or 0):04X} "
-                                   f"用法=0x{(ep.get('usage') or 0):04X} → {error}")
-                    continue
-                if (res.get("total") or 0) > 0:
-                    no_report = False
-                best = _pick_candidate(res)
-                # 原始帧留在报告里：读到了要能核对字节位置，读不到要能照着补协议。
-                if res.get("reports"):
-                    samples.append(f"{vid_pid} 页=0x{(ep.get('usage_page') or 0):04X} "
-                                   f"用法=0x{(ep.get('usage') or 0):04X} "
-                                   f"→ {res.get('total', 0)} 帧")
-                    for rid, hex_text in res["reports"][:4]:
-                        samples.append(f"    rid={rid}  {hex_text}")
-                if best is not None:
-                    hit = (ep, best)
-                    break
-
-            if hit is None:
-                if error:
-                    reason = "接收器没有开放电量通道（固件里没有电量数据）"
-                elif no_report:
-                    reason = ("厂商通道 2 秒内没有任何上报（这类设备只在被主动查询时才回答，"
-                              "需要按它的协议补一条指令）")
-                else:
-                    reason = "有上报，但报文里找不到稳定的电量字节"
-                result["logs"].append(f"[自动识别] {name} {vid_pid} 未读到：{reason}"
-                                      + (f"（原始错误：{error}）" if error else ""))
-                result["failed"].append({"name": name, "vid_pid": vid_pid, "reason": reason})
-                continue
-
-            ep, best = hit
-            label = name
-            kind = _kind_of(group_eps, label)
-            rule = {
-                "name": label,
-                "kind": kind,
-                "match": {
-                    "vendor_id": ep.get("vendor_id"),
-                    "product_id": ep.get("product_id"),
-                    "usage_page": ep.get("usage_page"),
-                    "usage": ep.get("usage"),
-                },
-                "query": "",
-                "report_id": best["report_id"],
-                "byte": best["byte"],
-                "transport": "2.4G 接收器",
-                "timeout": PROBE_SECONDS,
-            }
-            if _save_rule(config, rule):
-                result["rules"] += 1
-            devices.append(Device(
-                key=f"rule:{ep.get('vendor_id')}:{ep.get('product_id')}:{label}",
-                name=label,
-                kind=kind,
-                level=float(best["value"]),
-                source="自动识别",
-                transport="2.4G 接收器",
-                vid_pid=vid_pid,
-            ))
-            result["logs"].append(
-                f"[自动识别] {label} {vid_pid} 报文 0x{best['report_id']:02X} "
-                f"第 {best['byte']} 字节 = {best['value']}%")
-
-        for vid_pid, group_eps in skipped:
-            result["failed"].append({
-                "name": _display_name(group_eps, vid_pid),
-                "vid_pid": vid_pid,
-                "reason": f"这次检查的接收器太多，只看了前 {MAX_PROBES} 只，点一次重新诊断即可",
-            })
+            if _vendor_eps(group_eps):
+                reason = ("有厂商端点，但内置协议没匹配上 —— "
+                          "在「添加设备」里选型号试读一次即可")
+            else:
+                reason = "只有标准输入端点，没有厂商协议端点（这类设备不对外报电量）"
+            result["logs"].append(f"[诊断] {name} {vid_pid} 未读到：{reason}")
+            result["failed"].append({"name": name, "vid_pid": vid_pid, "reason": reason})
+        result["receivers"] = len(result["failed"])
 
     result["devices"] = devices
     result["seconds"] = time.monotonic() - started
@@ -363,8 +233,8 @@ def scan_only(config) -> dict:
     from scanner import Scanner
     devices, debug = Scanner(config).scan(with_debug=True, force=True)
     return {
-        "devices": devices, "failed": [], "rules": 0, "fixed": 0,
-        "endpoints": 0, "seconds": 0.0, "logs": debug, "samples": [], "stopped": False,
+        "devices": devices, "failed": [], "fixed": 0,
+        "endpoints": 0, "seconds": 0.0, "logs": debug, "stopped": False,
     }
 
 

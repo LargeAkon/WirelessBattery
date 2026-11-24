@@ -13,17 +13,17 @@ from __future__ import annotations
 from brands import describe as describe_brand
 
 VENDORS: dict[int, tuple[str, str]] = {
-    0x1B1C: ("Corsair 海盗船", "部分型号走 Compx 帧或系统电池"),
-    0x413C: ("Dell 戴尔", "多为系统电池通道"),
-    0x045E: ("Microsoft 微软", "系统电池通道"),
-    0x05AC: ("Apple", "系统电池通道"),
-    0x04F2: ("Chicony 群光", "有标准电量字段才读得到"),
-    0x0BDA: ("Realtek 瑞昱", "有标准电量字段才读得到"),
+    0x1B1C: ("Corsair 海盗船", "部分型号走 Compx 帧"),
+    0x413C: ("Dell 戴尔", "多为整机外设，不在外设协议范围"),
+    0x045E: ("Microsoft 微软", "多为整机外设，不在外设协议范围"),
+    0x05AC: ("Apple", "多为整机外设，不在外设协议范围"),
+    0x04F2: ("Chicony 群光", "有厂商端点才读得到"),
+    0x0BDA: ("Realtek 瑞昱", "有厂商端点才读得到"),
     0x0A12: ("CSR 蓝牙", "本工具不显示蓝牙"),
     0x8087: ("Intel 蓝牙", "本工具不显示蓝牙"),
     0x0A5C: ("Broadcom 博通蓝牙", "本工具不显示蓝牙"),
-    0x04CA: ("Lite-On 建兴", "有标准电量字段才读得到"),
-    0x045B: ("Renesas 瑞萨", "有标准电量字段才读得到"),
+    0x04CA: ("Lite-On 建兴", "有厂商端点才读得到"),
+    0x045B: ("Renesas 瑞萨", "有厂商端点才读得到"),
 }
 
 
@@ -33,6 +33,6 @@ def describe(vid: int | None) -> str:
         return branded
     name, path = VENDORS.get(
         vid or 0,
-        ("未知厂商", "仍会试 Compx 与 HID 标准电量，对不上就不显示"),
+        ("未知厂商", "仍会试芯片组与协议包，对不上就不显示"),
     )
     return f"{name} · {path}"

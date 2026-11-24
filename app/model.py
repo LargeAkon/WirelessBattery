@@ -41,9 +41,9 @@ class Device:
     source: str = ""
     transport: str = ""
     raw: dict = field(default_factory=dict)
-    # "046D:C547" 形式。同一个物理设备会被多条通道同时看到（接收器的
-    # 厂商协议 + 系统电池设备），跨通道去重靠它，不靠名字 —— 系统通道
-    # 拿到的名字往往是 "HID-compliant mouse"，和厂商通道对不上。
+    # "046D:C547" 形式。同一个物理设备会被多条通道同时看到（协议包与芯片组、
+    # 或用户添加的协议），跨通道去重靠它，不靠名字 —— 接收器报上来的名字
+    # 往往是 "USB Receiver"，各通道写法对不上。
     vid_pid: str = ""
 
     @property

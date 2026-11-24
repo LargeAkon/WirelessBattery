@@ -20,9 +20,9 @@ from ui.card import CardWindow  # noqa: E402
 from ui.diag import DiagWindow  # noqa: E402
 
 devices = [
-    Device(key="a", name="VXE75 V2", kind=KEYBOARD, level=76, source="自定义报文规则", transport="2.4G 接收器"),
-    Device(key="b", name="Game Mouse", kind=MOUSE, level=23, source="自定义报文规则", transport="2.4G 接收器"),
-    Device(key="c", name="WH-1000XM5", kind=HEADSET, level=55, charging=True, source="系统设备电量", transport="蓝牙"),
+    Device(key="a", name="VXE75 V2", kind=KEYBOARD, level=76, source="协议包·VGN", transport="2.4G 接收器"),
+    Device(key="b", name="Game Mouse", kind=MOUSE, level=23, source="协议包·ATK", transport="2.4G 接收器"),
+    Device(key="c", name="Cloud III Wireless", kind=HEADSET, level=55, charging=True, source="HyperX 电量", transport="2.4G 接收器"),
 ]
 
 app = QApplication([])

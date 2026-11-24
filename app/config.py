@@ -9,7 +9,7 @@ from pathlib import Path
 
 APP_NAME = "WirelessBattery"
 # 与 installer/setup.py 的 VERSION 保持一致（诊断报告里会写出来，方便对版本）
-APP_VERSION = "1.5.40"
+APP_VERSION = "1.5.29"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # 刷新间隔只提供三档
@@ -21,7 +21,6 @@ DEFAULTS = {
     "theme": "dark",            # dark / light
     "glass": True,              # 卡片毛玻璃（关掉就是实底卡片）
     "overrides": {},            # 设备 key -> {"kind":..., "name":...}
-    "custom_rules": [],         # 自定义报文规则（私有协议设备）
     "card_pinned": False,
 }
 

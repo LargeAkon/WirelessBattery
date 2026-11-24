@@ -24,7 +24,7 @@ from ui.card import CardWindow                                    # noqa: E402
 class FakeConfig:
     def __init__(self):
         self.data = {"interval_minutes": 10, "autostart": False, "theme": "dark",
-                     "glass": True, "overrides": {}, "custom_rules": []}
+                     "glass": True, "overrides": {}}
 
     def get(self, k, d=None):
         return self.data.get(k, d)

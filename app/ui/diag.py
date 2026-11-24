@@ -31,7 +31,7 @@ import autodiag
 import theme
 from config import APP_VERSION, Config
 from model import Device
-from providers import raw_hid, xinput_pad
+from providers import raw_hid
 from ui.adddevice import AddDeviceWindow
 from ui.rows import Row
 from vendors import describe as describe_vendor
@@ -66,14 +66,10 @@ class AutoDiagWorker(QThread):
             )
             if self.mode == "report":
                 result["endpoints_list"] = raw_hid.describe_endpoints()
-                try:
-                    result["xinput"] = xinput_pad.describe()
-                except Exception as exc:
-                    result["xinput"] = [f"XInput 读取失败: {type(exc).__name__}: {exc}"]
         except Exception as exc:
             result = {
                 "error": f"{type(exc).__name__}: {exc}",
-                "devices": [], "failed": [], "rules": 0,
+                "devices": [], "failed": [],
                 "endpoints": 0, "seconds": 0.0, "logs": [],
             }
         result["mode"] = self.mode
@@ -278,7 +274,7 @@ class DiagWindow(QWidget):
             return
 
         self.status.setText(autodiag.summary(result))
-        # 诊断结果要立刻反映到卡片上：本轮的规则已经写进配置，
+        # 诊断结果要立刻反映到卡片上（类型纠偏、已添加协议），
         # 让主窗口重新扫一遍就能出现在列表里。
         self.rule_changed.emit()
 
@@ -382,10 +378,7 @@ class DiagWindow(QWidget):
         else:
             lines.append("（无）")
 
-        lines += ["", "【三、XInput 槽位】手柄走 XInput 时只有四档，这里看原始值"]
-        lines.extend(result.get("xinput") or ["（未采集）"])
-
-        lines += ["", f"【四、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
+        lines += ["", f"【三、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
         for ep in eps:
             lines.append(
                 f"{ep['vendor_id']:04X}:{ep['product_id']:04X} | "
@@ -396,11 +389,7 @@ class DiagWindow(QWidget):
                 f"接口={ep['interface']}")
 
         debug = result.get("logs") or self._debug
-        samples = result.get("samples") or []
-        lines += ["", "【五、厂商端点被动采样】每个候选端点听 2 秒，原样记录上报帧"]
-        lines.extend(samples or ["（没有可采样的厂商端点）"])
-
-        lines += ["", f"【六、扫描日志】共 {len(debug)} 行"]
+        lines += ["", f"【五、扫描日志】共 {len(debug)} 行"]
         lines.extend(debug or ["（无）"])
         lines += ["", "=" * 46, "请把本文件整份发回，内容越多越好，不要删减。"]
 

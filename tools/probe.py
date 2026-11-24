@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""独立自检脚本：列出所有 HID 端点，并尝试 HID++ / 系统电量两条通道。"""
+"""独立自检脚本：列出所有 HID 端点，再跑一遍电量通道。"""
 from __future__ import annotations
 
 import sys
@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 
 import hid  # noqa: E402
 
-from providers import hidpp, win_pnp  # noqa: E402
+from config import Config  # noqa: E402
+from providers import hidpp  # noqa: E402
+from scanner import Scanner  # noqa: E402
 
 
 def main() -> None:
@@ -45,13 +47,17 @@ def main() -> None:
     for d in devs:
         print(f"     {d.name} | {d.type_label} | {d.level}% | 充电={d.charging} | {d.source}")
 
-    print("\n== 通道二：系统电量属性 ==")
-    dbg2: list[str] = []
-    devs2 = win_pnp.scan_windows_battery(dbg2)
-    for line in dbg2:
+    print("\n== 通道二：全部电量通道 ==")
+    try:
+        devs2, debug = Scanner(Config()).scan(with_debug=True, force=True)
+    except Exception as exc:
+        print(f"  扫描失败: {type(exc).__name__}: {exc}")
+        return
+    for line in debug:
         print("  " + line)
+    print(f"  -> 命中 {len(devs2)} 个设备")
     for d in devs2:
-        print(f"     {d.name} | {d.type_label} | {d.level}% | {d.source}")
+        print(f"     {d.name} | {d.type_label} | {d.level}% | 充电={d.charging} | {d.source}")
 
 
 if __name__ == "__main__":

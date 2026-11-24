@@ -49,7 +49,7 @@ _ROWS: dict[int, tuple[str, str]] = {
     0x0951: ("HyperX 金士顿", "Cloud II 无线只读电量"),
     0x24AE: ("Rapoo 雷柏", "监听 BB B0；带 FF02 的型号同时走 Compx"),
     0x260D: ("Dareu 达尔优", "Compx 17 字节帧（A950 一类）"),
-    0x062A: ("Delux 多彩", "M618 等 MosArt 接收器，有标准电量字段才读"),
+    0x062A: ("Delux 多彩", "M618 等 MosArt 接收器，有厂商端点才读"),
     0x3554: (
         "Compx 公版",
         "17 字节电量帧。ATK / VXE / VGN / 达尔优 / Pulsar 派世 / "
@@ -84,7 +84,7 @@ _ROWS: dict[int, tuple[str, str]] = {
     0x388D: ("Lofree", "自有 FF1C 帧，没有对过的样本就不发送"),
     0x372E: ("IPI", "自有协议，电量字节未确认，不发送猜测帧"),
     0x1D57: ("Attack Shark 旧接收器", "不是 Compx 17 字节帧，对不上就不显示"),
-    0x1395: ("EPOS", "有标准电量字段或系统电池才读"),
+    0x1395: ("EPOS", "有厂商端点才读"),
     0x057E: ("Nintendo 任天堂", "Switch 手柄是 USB / 蓝牙，不当作 2.4G 接收器去写"),
     0x258A: (
         "SINOWEALTH 中颖",
@@ -95,9 +95,9 @@ _ROWS: dict[int, tuple[str, str]] = {
     0x0C45: (
         "Sonix 松翰公版",
         "西伯利亚、iKF、阿斯盾、前行者、漫步者一类贴牌常见；"
-        "有标准电量字段才读得到",
+        "有厂商端点才读得到",
     ),
-    0x1EA7: ("Holtek 合泰公版", "有标准电量字段才读得到"),
+    0x1EA7: ("Holtek 合泰公版", "有厂商端点才读得到"),
 }
 
 

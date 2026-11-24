@@ -9,9 +9,10 @@
 * `SOURCE_RULES`：按来源前缀声明"是不是设备自己的协议、读不到时保留多久、加多少分"。
 
 只做 2.4G 接收器与 USB 有线，蓝牙链路在任何通道都不参与。
+只留逐型号/按芯片方案验证过的协议实现，不设"什么都能试一遍"的兜底扫描。
 
 注意文件顺序：纯数据与判定函数在前，通道模块的导入在后 ——
-`generic` 要用 `LIBRARY_SKIP_VIDS`，先定义再导入才不会撞成循环导入。
+避免 `added` 反查注册表时撞成循环导入。
 """
 from __future__ import annotations
 
@@ -31,12 +32,12 @@ class SourceRule:
 
 
 # 前缀越长越先匹配（"协议包·雷蛇" 与 "协议包" 都归到 "协议包" 那条）。
+# 表里只列真正会产出读数的来源 —— 全部是设备自己的电量协议。
 SOURCE_RULES: tuple[SourceRule, ...] = (
     # 罗技闲置约 15 分钟进深度休眠，保留 10 分钟才不会让设备"凭空消失"
     SourceRule("HID++", vendor=True, keep=600.0, bonus=1),
     SourceRule("Evision", vendor=True, keep=300.0, bonus=1),
     SourceRule("协议包", vendor=True, keep=300.0, bonus=1),
-    SourceRule("协议库", vendor=True, keep=300.0, bonus=1),
     SourceRule("HyperX", vendor=True, keep=300.0, bonus=1),
     # 芯片组通道的十三个子链路共用一组前缀，保留时长一致
     SourceRule("Compx", vendor=True, keep=300.0, bonus=1),
@@ -53,16 +54,12 @@ SOURCE_RULES: tuple[SourceRule, ...] = (
     SourceRule("怒喵", vendor=True, keep=300.0, bonus=1),
     SourceRule("索尼", vendor=True, keep=300.0, bonus=1),
     SourceRule("8BitDo", vendor=True, keep=300.0, bonus=1),
-    # HID 标准电池集合 / 手柄：走系统与标准报告，保留时长短一些
-    SourceRule("HID 电量", vendor=True, keep=180.0, bonus=1),
-    SourceRule("手柄电量", vendor=True, keep=180.0, bonus=1),
-    SourceRule("系统电池", keep=180.0),
-    SourceRule("系统设备电量", keep=180.0),
-    SourceRule("自定义报文规则", keep=180.0),
+    # 「添加设备」写进来的外置协议，与厂商通道同等权重
+    SourceRule("已添加", vendor=True, keep=300.0, bonus=1),
 )
 
-# 这些 VID 已经有专用通道在读（Evision 认 320F 的接收器），协议库不再重复试，
-# 否则同一只接收器会被两套代码各读一遍，出现两行同名设备。
+# 这些 VID 已经有专用通道在读（Evision 认 320F 的接收器），
+# 「添加设备」写进来的外置协议不再重复试，否则同一只接收器会被两套代码各读一遍。
 LIBRARY_SKIP_VIDS = frozenset({0x320F})
 
 _DEFAULT_RULE = SourceRule("")
@@ -107,8 +104,8 @@ def score(device: Device) -> int:
     return value
 
 
-# 通道的统一签名：(debug 列表或 None, 是否手动刷新, 自定义规则) -> 设备列表
-Scan = Callable[[list | None, bool, list], list[Device]]
+# 通道的统一签名：(debug 列表或 None, 是否手动刷新) -> 设备列表
+Scan = Callable[[list | None, bool], list[Device]]
 
 
 @dataclass(frozen=True)
@@ -120,46 +117,30 @@ class Channel:
 
 
 def _channels() -> tuple[Channel, ...]:
-    """通道清单。函数内导入：让上面的常量先就位，避免与 generic 循环导入。"""
-    from providers import (evision, generic, hid_desc, hidpp, hyperx, oem,
-                           packs, raw_hid, win_battery, win_pnp, xinput_pad)
+    """通道清单。函数内导入：让上面的常量先就位，避免与 added 循环导入。"""
+    from providers import added, evision, hidpp, hyperx, oem, packs
 
-    # 顺序即优先级：已验证的私有协议排在前面，兜底通道垫后。
-    # 同一台设备被多条通道读到时，`scanner` 会按 score() 保留一条。
+    # 五条专用协议通道 + 一条「添加设备」的外置协议通道。
+    # 同一台设备被两条通道读到时，`scanner` 按 score() 保留一条。
     return (
         Channel("packs", "协议包",
-                lambda d, f, r: packs.scan(d, force=f),
+                lambda d, f: packs.scan(d, force=f),
                 "逐型号私有协议（2.4G 接收器与 USB 有线）"),
         Channel("evision", "Evision",
-                lambda d, f, r: evision.scan_evision(d, force=f),
+                lambda d, f: evision.scan_evision(d, force=f),
                 "Evision/Compx 芯片方案的 2.4G 接收器"),
         Channel("hidpp", "HID++",
-                lambda d, f, r: hidpp.scan_logitech(d, force=f),
+                lambda d, f: hidpp.scan_logitech(d, force=f),
                 "罗技 Bolt / Unifying 接收器"),
         Channel("hyperx", "HyperX",
-                lambda d, f, r: hyperx.scan_hyperx(d, force=f),
+                lambda d, f: hyperx.scan_hyperx(d, force=f),
                 "HyperX 2.4G 耳机"),
         Channel("oem", "芯片组",
-                lambda d, f, r: oem.scan_oem(d, force=f),
+                lambda d, f: oem.scan_oem(d, force=f),
                 "按芯片方案读，覆盖一批贴牌"),
-        Channel("library", "协议库",
-                lambda d, f, r: generic.scan_profiles(d, force=f),
-                "按 VID:PID 精确匹配已知型号"),
-        Channel("hid_desc", "HID电量",
-                lambda d, f, r: hid_desc.scan_hid_battery(d),
-                "描述符里带 Battery Strength 的设备"),
-        Channel("xinput", "手柄",
-                lambda d, f, r: xinput_pad.scan_xinput(d),
-                "XInput 手柄（四档电量）"),
-        Channel("win_battery", "系统电池",
-                lambda d, f, r: win_battery.scan_win_battery(d),
-                "系统电池类设备"),
-        Channel("win_pnp", "系统电量",
-                lambda d, f, r: win_pnp.scan_windows_battery(d),
-                "设备属性里的 BatteryLevel"),
-        Channel("raw_hid", "自定义规则",
-                lambda d, f, r: raw_hid.scan_custom(r, d),
-                "诊断时录下来的私有报文规则"),
+        Channel("added", "已添加",
+                lambda d, f: added.scan_added(d, force=f),
+                "「添加设备」里手动试读通过的协议"),
     )
 
 

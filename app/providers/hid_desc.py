@@ -1,32 +1,21 @@
 # -*- coding: utf-8 -*-
-"""标准 HID 电量字段。
+"""HID 报告描述符里的电量字段。
 
-很多 2.4G 接收器不说私有协议，但报告描述符里声明了
-Battery Strength（页面 0x01 / 0x06，用途 0x20）。
-描述符对上才读，读到的值还要落在该字段自己的量程里。
+这是给协议包用的解析工具，不是一条独立的读取通道：
+报告描述符能说明每个 report ID 有多长、有没有声明 Battery Strength
+（页面 0x01 / 0x06，用途 0x20）。协议包据此判断该发多长的帧、去哪个字节取值，
+不再靠猜。
 """
 from __future__ import annotations
 
 import ctypes
-import time
 from ctypes import wintypes
-
-try:
-    import hid
-except Exception:  # pragma: no cover
-    hid = None
-
-from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
-from providers.hidlist import devices as hid_devices
-from providers.hidpath import is_bluetooth, phys_token
 
 GENERIC_READ = 0x80000000
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
 IOCTL_HID_GET_REPORT_DESCRIPTOR = 0x000B0192
-
-_FIELDS: dict[bytes, list[dict]] = {}
 
 
 def read_descriptor(path) -> bytes:
@@ -181,149 +170,3 @@ def to_percent(value: int | None, logical_max: int) -> float | None:
         return float(value)
     return None
 
-
-def _fields_for(path: bytes) -> list[dict]:
-    cached = _FIELDS.get(path)
-    if cached is not None:
-        return cached
-    try:
-        desc = read_descriptor(path)
-    except Exception:
-        desc = b""
-    parsed = parse_battery_fields(desc)
-    _FIELDS[path] = parsed
-    return parsed
-
-
-def _payload_after_id(data: bytes, report_id: int) -> bytes | None:
-    if not data:
-        return None
-    if report_id:
-        if data[0] != report_id:
-            return None
-        return data[1:]
-    return data
-
-
-def _read_field(dev, field: dict) -> float | None:
-    report_id = field["report_id"] or 0
-    if field["kind"] == "feat":
-        try:
-            raw = dev.get_feature_report(report_id, 64)
-        except Exception:
-            return None
-        payload = _payload_after_id(bytes(raw or b""), report_id)
-        if payload is None:
-            return None
-        value = extract_bits(payload, field["bit_offset"], field["bit_size"])
-        return to_percent(value, field["logical_max"])
-
-    if field["kind"] != "in":
-        return None
-    deadline = time.monotonic() + 0.35
-    while time.monotonic() < deadline:
-        try:
-            raw = dev.read(64, 40)
-        except Exception:
-            return None
-        if not raw:
-            continue
-        payload = _payload_after_id(bytes(raw), report_id)
-        if payload is None:
-            continue
-        value = extract_bits(payload, field["bit_offset"], field["bit_size"])
-        level = to_percent(value, field["logical_max"])
-        if level is not None:
-            return level
-    return None
-
-
-def _kind_of(usages: set[tuple[int, int]], name: str) -> str:
-    low = (name or "").lower()
-    if any(k in low for k in ("headset", "headphone", "earbud", "耳机", "耳麦")):
-        return HEADSET
-    if ((0x01, 0x05) in usages or (0x01, 0x04) in usages
-            or any(k in low for k in ("controller", "gamepad", "手柄"))):
-        return GAMEPAD
-    if (0x01, 0x02) in usages or "mouse" in low or "鼠标" in low:
-        return MOUSE
-    if (0x01, 0x06) in usages or "keyboard" in low or "键盘" in low:
-        return KEYBOARD
-    return UNKNOWN
-
-
-def _name_of(infos: list[dict], vid: int, pid: int) -> str:
-    for info in infos:
-        product = (info.get("product_string") or "").strip()
-        if product and product not in ("-", "USB Receiver", "2.4G Receiver"):
-            return product
-    for info in infos:
-        product = (info.get("product_string") or "").strip()
-        if product:
-            return f"{product} {vid:04X}:{pid:04X}"
-    return f"无线设备 {vid:04X}:{pid:04X}"
-
-
-def scan_hid_battery(debug: list | None = None) -> list[Device]:
-    if hid is None:
-        return []
-    infos = hid_devices()
-
-    groups: dict[tuple, list[dict]] = {}
-    for info in infos:
-        path = info.get("path")
-        if not path or is_bluetooth(path):
-            continue
-        vid = info.get("vendor_id") or 0
-        pid = info.get("product_id") or 0
-        if not vid:
-            continue
-        groups.setdefault((vid, pid, phys_token(path)), []).append(info)
-
-    devices: list[Device] = []
-    for (vid, pid, phys), members in groups.items():
-        usages = {(i.get("usage_page") or 0, i.get("usage") or 0) for i in members}
-        chosen = None
-        level = None
-        for info in members:
-            fields = [f for f in _fields_for(info["path"]) if f["kind"] in ("feat", "in")]
-            fields.sort(key=lambda f: 0 if f["kind"] == "feat" else 1)
-            if not fields:
-                continue
-            dev = hid.device()
-            try:
-                dev.open_path(info["path"])
-                dev.set_nonblocking(True)
-            except Exception:
-                continue
-            try:
-                for field in fields:
-                    level = _read_field(dev, field)
-                    if level is not None:
-                        chosen = info
-                        break
-            finally:
-                try:
-                    dev.close()
-                except Exception:
-                    pass
-            if level is not None:
-                break
-        if level is None or chosen is None:
-            continue
-        name = _name_of(members, vid, pid)
-        if debug is not None:
-            debug.append(f"[HID 电量] {vid:04X}:{pid:04X} {name!r} 电量={level}")
-        devices.append(Device(
-            key=f"hidbat:{vid:04x}:{pid:04x}:{phys}",
-            name=name,
-            kind=_kind_of(usages, name),
-            level=level,
-            source="HID 电量",
-            transport="2.4G 接收器",
-            raw={"phys": phys, "state": "正常"},
-            vid_pid=f"{vid:04X}:{pid:04X}",
-        ))
-    if debug is not None:
-        debug.append(f"[HID 电量] 命中 {len(devices)} 台")
-    return devices

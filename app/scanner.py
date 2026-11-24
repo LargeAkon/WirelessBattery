@@ -31,7 +31,6 @@ class Scanner:
              force: bool = False) -> tuple[list[Device], list[str]]:
         debug: list[str] = []
         found: list[Device] = []
-        rules = self.config.get("custom_rules") or []
 
         # 通道之间不互相等结果。线程只留 3 条：hidapi 自己有全局锁，
         # 开得再多也不会真的同时读设备，只会在点刷新时多占一截栈内存。
@@ -42,7 +41,7 @@ class Scanner:
             for channel in registry.CHANNELS:
                 local = [] if with_debug else None
                 futures.append((channel.label, local,
-                                pool.submit(channel.run, local, force, rules)))
+                                pool.submit(channel.run, local, force)))
             for label, local, fut in futures:
                 try:
                     found.extend(fut.result())
@@ -60,8 +59,8 @@ class Scanner:
         found = [d for d in found
                  if not (d.level is None and (d.raw or {}).get("state") == "无电量接口")]
 
-        # 本工具只管 2.4G / USB 有线。系统通道已按总线前缀挡掉蓝牙，
-        # 这里再兜一道：HID++ 可能把蓝牙连接的罗技设备报上来。
+        # 本工具只管 2.4G / USB 有线。HID++ 可能把蓝牙连接的罗技设备报上来，
+        # 这里兜一道。扫描源头也已按总线前缀过滤。
         found = [d for d in found if "蓝牙" not in (d.transport or "")]
 
         found = self._dedupe_channels(found, debug)
@@ -108,63 +107,26 @@ class Scanner:
         return alive, debug
     # ---------- 跨通道去重 ----------
     def _dedupe_channels(self, devices: list[Device], debug: list[str]) -> list[Device]:
-        """同一个物理设备会被多条通道同时看到，这里只留读数最好的一条。
+        """同一只接收器被两条通道同时读到，只留一条。
 
-        两种重复：
-        1. 「系统电池」与「系统设备电量」读的是同一批设备 —— instance 相同就合并，
-           留电池类那条：它能给出充放电状态，读数也更实时。
-        2. 厂商协议（HID++ / Evision）能读到的设备，系统通道那条必然重复。
-           厂商通道名字是型号、读数直接来自固件，优先保留。
-
-        第 2 条按 VID:PID 加设备类型判断。接收器上的键盘不会因为
-        鼠标已经被厂商通道读到就被一起丢掉。
+        「已添加」是用户手动试读通过的协议，判据可能和协议包/芯片组重叠。
+        专用通道那一条能拿到型号名、充电位与慢协议窗口，是更完整的一份；
+        同一条接收器（VID:PID + 实例）已经在别处读到，就不再列第二行。
         """
-        battery_instances = {
-            (d.raw or {}).get("instance")
-            for d in devices if d.source == "系统电池" and (d.raw or {}).get("instance")
-        }
+        native = {(d.vid_pid, (d.raw or {}).get("phys")) for d in devices
+                  if registry.is_vendor(d) and not (d.source or "").startswith("已添加")
+                  and (d.raw or {}).get("phys")}
+        if not native:
+            return devices
         kept: list[Device] = []
         for d in devices:
-            if d.source == "系统设备电量":
-                inst = (d.raw or {}).get("instance")
-                if inst and inst in battery_instances:
-                    if debug:
-                        debug.append(f"[合并] {d.name} 与系统电池通道重复，已丢弃")
-                    continue
-            kept.append(d)
-
-        vendor_kinds: dict[str, set[str]] = {}
-        for d in kept:
-            if d.vid_pid and d.level is not None and registry.is_vendor(d):
-                vendor_kinds.setdefault(d.vid_pid, set()).add(d.kind or UNKNOWN)
-        result: list[Device] = []
-        for d in kept:
-            kinds = vendor_kinds.get(d.vid_pid or "")
-            if (d.source in ("系统电池", "系统设备电量") and kinds
-                    and (UNKNOWN in kinds or d.kind in kinds or d.kind == UNKNOWN)):
+            if ((d.source or "").startswith("已添加")
+                    and (d.vid_pid, (d.raw or {}).get("phys")) in native):
                 if debug:
-                    debug.append(
-                        f"[合并] {d.name} 已被厂商通道读到（{d.vid_pid}），系统通道重复项丢弃")
+                    debug.append(f"[合并] {d.name} 已被专用通道读同一条接收器，已添加副本丢弃")
                 continue
-            result.append(d)
-
-        # 3. 协议库是兜底通道：同一只接收器（VID:PID + 实例）已经被专用通道
-        #    读到，就不再重复列一条。专用通道能拿到充电位、型号名与慢协议窗口，
-        #    协议库的覆盖面则是它的补充 —— 两者都命中时留前者。
-        native = {(d.vid_pid, (d.raw or {}).get("phys")) for d in result
-                  if registry.is_vendor(d) and not (d.source or "").startswith("协议库")
-                  and (d.raw or {}).get("phys")}
-        if native:
-            trimmed: list[Device] = []
-            for d in result:
-                if ((d.source or "").startswith("协议库")
-                        and (d.vid_pid, (d.raw or {}).get("phys")) in native):
-                    if debug:
-                        debug.append(f"[合并] {d.name} 已被专用通道读同一条接收器，协议库副本丢弃")
-                    continue
-                trimmed.append(d)
-            result = trimmed
-        return result
+            kept.append(d)
+        return kept
 
     # ---------- 合并去重 ----------
     def _merge(self, devices: list[Device], debug: list[str]) -> list[Device]:

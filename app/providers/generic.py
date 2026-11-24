@@ -18,6 +18,7 @@ import time
 
 import profiles
 from model import GAMEPAD, HEADSET, KEYBOARD, MOUSE, UNKNOWN, Device
+from providers import packs, registry
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth
 from providers.oem import _instance, _kind as _oem_kind, _product_name
@@ -51,7 +52,8 @@ _NAME_HINTS = (
 
 # 整个 VID 都被专门通道接管：320F 是 Evision 方案，所有 ATK/VGN/VXE/WOB
 # 键盘鼠标都走那条通道（含 14 秒慢窗口）。这里再发一遍别的帧只会白等超时。
-_COVERED_VIDS = {0x320F}
+# 这些 VID 已经有专用通道（Evision 认 320F 的接收器），协议库不再重复试
+_COVERED_VIDS = registry.LIBRARY_SKIP_VIDS
 
 
 def _cooled(key: tuple, force: bool) -> bool:
@@ -131,6 +133,15 @@ def scan_profiles(debug: list | None = None, force: bool = False) -> list[Device
     for (vid, pid, instance), members in _groups(infos).items():
         if vid in _COVERED_VIDS:
             continue
+        # 「协议包」里是逐型号验证过的原版实现（带会话、ACK、校验和），
+        # 同一组接口被它认领时这里整组让位 —— 两套同时打开会互相抢应答帧。
+        try:
+            if packs.owns(vid, pid, members, instance):
+                if debug is not None:
+                    debug.append(f"[协议库] {vid:04X}:{pid:04X} 已由协议包接管，跳过")
+                continue
+        except Exception:
+            pass
         vid_hex, pid_hex = f"{vid:04X}", f"{pid:04X}"
         all_cands = [p for p in profiles.for_ids(vid_hex, pid_hex) if p["id"] not in _NATIVE]
         if not all_cands:

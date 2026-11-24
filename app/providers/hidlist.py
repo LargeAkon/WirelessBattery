@@ -24,7 +24,12 @@ def _load() -> list[dict]:
         raw = hid.enumerate()
     except Exception:
         return []
-    slim = [{key: info.get(key) for key in _KEEP} for info in raw]
+    from providers.hidpath import is_bluetooth
+
+    # 只做 2.4G 接收器与 USB 有线：蓝牙路径（BTHENUM / BTHLE）在这里就挡掉，
+    # 后面各通道不必再各自判断，也省得对着蓝牙设备白发查询帧。
+    slim = [{key: info.get(key) for key in _KEEP} for info in raw
+            if not is_bluetooth(info.get("path"))]
     del raw
     return slim
 

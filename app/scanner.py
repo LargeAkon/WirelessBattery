@@ -1,24 +1,19 @@
 # -*- coding: utf-8 -*-
-"""扫描调度与结果合并：多通道 -> 统一设备列表。"""
+"""扫描调度与结果合并：多通道 -> 统一设备列表。
+
+通道清单、来源判定、保留时长与合并权重都在 `providers/registry.py`，
+这里只负责并发跑一遍、按优先级去重、维护"读不到时沿用上次读数"的缓存。
+"""
 from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from config import Config
-from model import Device, UNKNOWN
-from providers import (evision, generic, hid_desc, hidlist, hidpp, hyperx, oem,
-                       raw_hid, win_battery, win_pnp, xinput_pad)
+from model import UNKNOWN, Device
+from providers import hidlist, registry
 
 MAX_MISS = 3  # 连续失败几次后不再显示，避免闪断
-
-# 这些通道读的是设备自己的电量协议。同 VID 的系统条目要让路，
-# 但只让给已经读到的那一类：接收器上的键盘不能因为鼠标读到了就被删掉。
-_VENDOR_SOURCES = (
-    "HID++", "Evision", "Compx", "Razer", "华硕", "雷柏",
-    "VAXEE", "迈从", "厂商", "索尼", "8BitDo", "怒喵", "HID 电量", "手柄电量",
-    "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "协议库",
-)
 
 
 class Scanner:
@@ -36,19 +31,7 @@ class Scanner:
              force: bool = False) -> tuple[list[Device], list[str]]:
         debug: list[str] = []
         found: list[Device] = []
-        channels = [
-            ("Evision", lambda d: evision.scan_evision(d, force=force)),
-            ("HID++", lambda d: hidpp.scan_logitech(d, force=force)),
-            ("HyperX", lambda d: hyperx.scan_hyperx(d, force=force)),
-            ("芯片组", lambda d: oem.scan_oem(d, force=force)),
-            ("协议库", lambda d: generic.scan_profiles(d, force=force)),
-            ("HID描述符", lambda d: hid_desc.scan_hid_battery(d)),
-            ("手柄", lambda d: xinput_pad.scan_xinput(d)),
-            ("系统电池", lambda d: win_battery.scan_win_battery(d)),
-            ("系统电量", lambda d: win_pnp.scan_windows_battery(d)),
-            ("自定义规则", lambda d: raw_hid.scan_custom(
-                self.config.get("custom_rules") or [], d)),
-        ]
+        rules = self.config.get("custom_rules") or []
 
         # 通道之间不互相等结果。线程只留 3 条：hidapi 自己有全局锁，
         # 开得再多也不会真的同时读设备，只会在点刷新时多占一截栈内存。
@@ -56,9 +39,10 @@ class Scanner:
         logs: list[list[str]] = []
         with hidlist.shared(), ThreadPoolExecutor(max_workers=3) as pool:
             futures = []
-            for label, fn in channels:
+            for channel in registry.CHANNELS:
                 local = [] if with_debug else None
-                futures.append((label, local, pool.submit(fn, local)))
+                futures.append((channel.label, local,
+                                pool.submit(channel.run, local, force, rules)))
             for label, local, fut in futures:
                 try:
                     found.extend(fut.result())
@@ -104,7 +88,7 @@ class Scanner:
             if key in current_keys:
                 continue
             miss += 1
-            stale = (now - last_ok) > _keep_seconds(device)
+            stale = (now - last_ok) > registry.keep_seconds(device)
             if miss >= MAX_MISS and stale:
                 self._cache.pop(key, None)
                 continue
@@ -151,7 +135,7 @@ class Scanner:
 
         vendor_kinds: dict[str, set[str]] = {}
         for d in kept:
-            if d.vid_pid and d.level is not None and _is_vendor(d):
+            if d.vid_pid and d.level is not None and registry.is_vendor(d):
                 vendor_kinds.setdefault(d.vid_pid, set()).add(d.kind or UNKNOWN)
         result: list[Device] = []
         for d in kept:
@@ -168,7 +152,7 @@ class Scanner:
         #    读到，就不再重复列一条。专用通道能拿到充电位、型号名与慢协议窗口，
         #    协议库的覆盖面则是它的补充 —— 两者都命中时留前者。
         native = {(d.vid_pid, (d.raw or {}).get("phys")) for d in result
-                  if _is_vendor(d) and not (d.source or "").startswith("协议库")
+                  if registry.is_vendor(d) and not (d.source or "").startswith("协议库")
                   and (d.raw or {}).get("phys")}
         if native:
             trimmed: list[Device] = []
@@ -199,8 +183,8 @@ class Scanner:
                 by_name[name_key] = device
                 continue
             # 保留信息更完整的一条
-            score_new = _score(device)
-            score_old = _score(existing)
+            score_new = registry.score(device)
+            score_old = registry.score(existing)
             if score_new > score_old:
                 by_name[name_key] = device
             elif debug:
@@ -227,39 +211,3 @@ class Scanner:
         return devices
 
 
-def _is_vendor(device: Device) -> bool:
-    return (device.source or "").startswith(_VENDOR_SOURCES)
-
-
-def _keep_seconds(device: Device) -> float:
-    """设备读不到时保留上次读数多久（秒）。"""
-    src = device.source or ""
-    if src.startswith("HID++"):
-        # 罗技设备闲置约 15 分钟进深度休眠，期间完全不应答 HID++。
-        # 保留 10 分钟：既覆盖典型休眠，又不至于拔掉后长时间挂着幽灵设备。
-        return 600.0
-    if src.startswith(("Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
-                        "迈从", "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "协议库")):
-        return 300.0
-    return 180.0
-
-
-def _score(device: Device) -> int:
-    score = 0
-    if device.level is not None:
-        score += 4
-    if device.kind != UNKNOWN:
-        score += 2
-    if _is_vendor(device):
-        score += 2
-    if device.source.startswith(
-            ("HID++", "Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
-             "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "迈从", "协议库")):
-        score += 1
-    # 同一只鼠标可能同时被"有线直连"和"接收器"看到（插着线充电、无线也还注册着）。
-    # 有线这一路是实时直连，接收器那路可能滞后，合并时优先保留有线读数。
-    if device.transport.startswith("USB 有线"):
-        score += 3
-    if device.name and any(ch.isupper() for ch in device.name):
-        score += 1
-    return score

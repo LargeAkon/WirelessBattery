@@ -134,7 +134,7 @@ def pack_payload() -> None:
     with tarfile.open(fileobj=buf, mode="w") as tf:
         for path in files:
             tf.add(path, arcname=str(path.relative_to(APP_DIST)))
-    data = lzma.compress(buf.getvalue(), preset=6)
+    data = lzma.compress(buf.getvalue(), preset=9 | lzma.PRESET_EXTREME)
     PAYLOAD.write_bytes(data)
     print(f"payload.tar.xz {PAYLOAD.stat().st_size / 1024 / 1024:.1f} MB")
 

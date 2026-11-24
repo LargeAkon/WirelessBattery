@@ -22,6 +22,7 @@ from config import (                                                          # 
 )
 from model import Device                                                      # noqa: E402
 from scanner import Scanner                                                   # noqa: E402
+from trayhover import TrayHover                                               # noqa: E402
 from ui import icons                                                          # noqa: E402
 from ui.card import CardWindow                                                # noqa: E402
 from ui.diag import DiagWindow                                                # noqa: E402
@@ -94,6 +95,11 @@ class TrayApp:
         self.tray_pulse.setInterval(140)   # 14 帧 × 140ms ≈ 2.0s 从空充满一次
         self.tray_pulse.timeout.connect(self._next_tray_frame)
 
+        # 悬停托盘图标直接弹卡片（原生 tooltip 只有一行字，信息太少）
+        self.hover = TrayHover(self.tray, self.card)
+        self.hover.supported_changed.connect(self._on_hover_support)
+        self.hover.start()
+
         self.timer = QTimer()
         self.timer.setInterval(self.config.interval_ms)
         self.timer.timeout.connect(lambda: self.refresh())
@@ -151,6 +157,7 @@ class TrayApp:
     def _on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
             if self.card.isVisible():
+                self.hover.mute()
                 self.card.hide_card()
                 return
             # 失焦自动隐藏与再次点击可能同帧发生，做一次去抖
@@ -231,6 +238,19 @@ class TrayApp:
                 lines.append(f"{dev.name}  {dev.percent_text}%{mark}")
         return "\n".join(lines)
 
+    def _on_hover_support(self, ok: bool) -> None:
+        self._sync_tooltip()
+
+    def _sync_tooltip(self) -> None:
+        """能靠悬停弹卡片时就把原生那一行提示清掉。
+
+        两套提示同时出现会"文字卡片一闪一闪"，而且原生 tooltip 长得跟
+        卡片完全不搭。图标被折进「^」里、悬停不可用时再退回文字。
+        """
+        text = "" if self.hover.supported else self._tooltip()
+        if self.tray.toolTip() != text:
+            self.tray.setToolTip(text)
+
     # ---------------- 刷新 ----------------
     def refresh(self, manual: bool = False, force: bool = None) -> None:
         if self._worker and self._worker.isRunning():
@@ -254,7 +274,7 @@ class TrayApp:
         self.card.set_last_refresh(QTime.currentTime().toString("HH:mm"))
         self.card.set_devices(self.devices, error or None)
         self._update_tray_icon()
-        self.tray.setToolTip(self._tooltip())
+        self._sync_tooltip()
         self._sync_timer_interval()
         if self._diag:
             self._diag.update_devices(self.devices, self.debug_lines)
@@ -312,6 +332,7 @@ class TrayApp:
 
     def quit(self) -> None:
         self.timer.stop()
+        self.hover.stop()
         self.tray.hide()
         self.app.quit()
 

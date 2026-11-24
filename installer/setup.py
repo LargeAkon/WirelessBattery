@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 APP_NAME = "WirelessBattery"
 DISPLAY_NAME = "外设电量"
-VERSION = "1.5.29"
+VERSION = "1.5.40"
 PUBLISHER = "Local"
 EXE_NAME = "WirelessBattery.exe"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

@@ -85,8 +85,6 @@ def test_others() -> None:
     asus = bytes([0x03, 0x12, 0x07, 0x00, 0x00, 53, 0x02, 0x14, 0xFD, 0x0E, 0x00])
     _check("asus", proto.parse_asus(asus) == (53.0, False))
     _check("asus standby", proto.parse_asus(bytes([0x00, 0x12, 0x07, 0, 0, 0, 0, 0, 0, 0, 0])) is None)
-    rapoo = bytes([0xBB, 0xB0, 0x81, 0x20, 0x03, 0x02, 60])
-    _check("rapoo", proto.parse_rapoo(rapoo) == (60.0, True))
     feature = bytearray(16)
     feature[6] = 0x83
     feature[7] = 1
@@ -110,11 +108,6 @@ def test_others() -> None:
     tenths[16] = (0x55 - (sum(tenths[:16]) & 0xFF)) & 0xFF
     _check("areson tenths", proto.parse_compx(bytes(tenths), tenths=True) == (80.0, False))
     _check("nordic nines stay", proto.parse_compx(bytes(tenths)) == (8.0, False))
-    _check("rapoo shifted", proto.parse_rapoo(bytes([0x00, 0xBB, 0xB0, 0, 0, 0, 0, 22])) == (22.0, False))
-    ds = bytearray(64)
-    ds[0] = 0x01
-    ds[53] = 0x18  # state 1, level 8
-    _check("dualsense", proto.parse_dualsense(bytes(ds)) == (80.0, True))
 
 
 def test_hyperx() -> None:

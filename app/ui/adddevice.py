@@ -1,29 +1,30 @@
 # -*- coding: utf-8 -*-
-"""添加设备：接收器列表 → 选品牌型号 → 试读 → 添加。
+"""添加设备：选接收器 → 选品牌型号（可搜索）→ 试读 → 添加。
 
 为什么要这个窗口：自动诊断是「我替你猜」，猜不到的时候（私有帧、同 ID 多品牌）
 需要人给一个提示。原来的做法是让人复制端点文本，那是给开发者用的；
 这里改成从协议库里选型号 —— 用户只需要知道自己的设备叫什么。
 
-界面上只有四步，没有说明段落：
-    左边选接收器 → 右边选型号（可搜索）→ 试读 → 添加
+界面就是四步，没有说明段落：
+    上面：点一台接收器
+    中间：选型号（或直接「自动探测」）
+    下面：试读 → 添加
 试读通过才会写盘：写的是配置目录里的外置协议，下次启动直接读，不用再点诊断。
 """
 from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QCompleter, QDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 import autodiag
 import profiles
 import theme
-from PySide6.QtGui import QPalette
+from ui.rows import PickRow
 
 
 class _Worker(QThread):
@@ -61,20 +62,6 @@ class _Worker(QThread):
         self.done.emit(result)
 
 
-def _style_table(t: QTableWidget) -> None:
-    pal = t.palette()
-    soft = theme.color(theme.BG_SOFT)
-    text = theme.color(theme.TEXT)
-    for role, color in ((QPalette.Base, soft), (QPalette.Window, soft),
-                        (QPalette.Text, text), (QPalette.WindowText, text),
-                        (QPalette.Highlight, theme.color(theme.BG_ROW_HOVER)),
-                        (QPalette.HighlightedText, text)):
-        pal.setColor(role, color)
-    t.setPalette(pal)
-    t.viewport().setPalette(pal)
-    t.horizontalHeader().setPalette(pal)
-
-
 class AddDeviceWindow(QDialog):
     added = Signal()
 
@@ -83,6 +70,8 @@ class AddDeviceWindow(QDialog):
         self.config = config
         self._known = known or set()
         self._receivers: list[dict] = []
+        self._rows: list[PickRow] = []
+        self._index = -1
         self._worker: _Worker | None = None
         self._result: dict | None = None
         self._tried: set[str] = set()
@@ -90,29 +79,36 @@ class AddDeviceWindow(QDialog):
         self.setWindowTitle("添加设备")
         self.setObjectName("DiagRoot")
         self.setStyleSheet(theme.qss())
-        self.setMinimumSize(560, 460)
+        self.setMinimumSize(480, 440)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 16, 20, 14)
+        root.setSpacing(11)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["接收器", "编号"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(30)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setShowGrid(False)
-        self.table.setFrameShape(QTableWidget.NoFrame)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.table.setColumnWidth(1, 92)
-        _style_table(self.table)
-        self.table.itemSelectionChanged.connect(self._on_receiver)
-        root.addWidget(self.table, 1)
+        title = QLabel("选择要添加的设备")
+        title.setObjectName("DiagTitle")
+        root.addWidget(title)
 
+        # ---------- 接收器列表（一行一台，点一下选中） ----------
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.viewport().setAutoFillBackground(False)
+        self.scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        holder = QWidget()
+        self.list_lay = QVBoxLayout(holder)
+        self.list_lay.setContentsMargins(0, 0, 4, 0)
+        self.list_lay.setSpacing(4)
+        self.list_lay.addStretch(1)
+        self.scroll.setWidget(holder)
+        root.addWidget(self.scroll, 1)
+
+        # ---------- 型号 ----------
         row = QHBoxLayout()
         row.setSpacing(8)
         self.combo = QComboBox()
@@ -120,6 +116,12 @@ class AddDeviceWindow(QDialog):
         self.combo.setInsertPolicy(QComboBox.NoInsert)
         self.combo.setFixedHeight(30)
         self._fill_combo()
+        # 可搜索下拉的两个手感问题：
+        # 1) 框里已经有一行"自动判断…"，直接打字是往后追加，搜不出东西 ——
+        #    聚焦时全选，敲第一个键就整行替换，不用先手动删字；
+        # 2) 用户点输入框是想展开列表，不是想编辑那行字 —— 点一下直接弹列表。
+        self.combo.lineEdit().installEventFilter(self)
+        self.combo.lineEdit().textEdited.connect(self._on_combo_typed)
         row.addWidget(self.combo, 1)
 
         self.probe_btn = QPushButton("自动探测")
@@ -131,7 +133,7 @@ class AddDeviceWindow(QDialog):
         root.addLayout(row)
 
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("设备名称（可不填，默认用型号名）")
+        self.name_edit.setPlaceholderText("名称（可不填）")
         self.name_edit.setFixedHeight(30)
         root.addWidget(self.name_edit)
 
@@ -152,7 +154,7 @@ class AddDeviceWindow(QDialog):
         self.add_btn = QPushButton("添加设备")
         self.add_btn.setObjectName("Primary")
         self.add_btn.setCursor(Qt.PointingHandCursor)
-        self.add_btn.setFixedHeight(30)
+        self.add_btn.setFixedHeight(32)
         self.add_btn.setEnabled(False)
         self.add_btn.clicked.connect(self._add)
         bottom.addWidget(self.add_btn)
@@ -161,6 +163,20 @@ class AddDeviceWindow(QDialog):
         self.reload()
 
     # ---------------- 数据 ----------------
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802
+        if obj is self.combo.lineEdit():
+            if ev.type() == QEvent.FocusIn:
+                # 全选要在下一个事件循环做：焦点事件本身还会重设光标位置
+                QTimer.singleShot(0, obj.selectAll)
+            elif ev.type() == QEvent.MouseButtonPress:
+                QTimer.singleShot(0, self.combo.showPopup)
+        return super().eventFilter(obj, ev)
+
+    def _on_combo_typed(self, _text: str) -> None:
+        # 用户开始打字了：完整列表让位给搜索补全，两个浮层别叠在一起
+        if self.combo.view().isVisible():
+            self.combo.hidePopup()
+
     def _fill_combo(self) -> None:
         self.combo.clear()
         self.combo.addItem("自动判断（按 ID 匹配）", "")
@@ -178,49 +194,74 @@ class AddDeviceWindow(QDialog):
         completer.setFilterMode(Qt.MatchContains)
         self.combo.setCompleter(completer)
 
+    def _clear_rows(self) -> None:
+        while self.list_lay.count():
+            item = self.list_lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._rows = []
+
     def reload(self) -> None:
         self._receivers = autodiag.receivers(self._known)
-        self.table.setRowCount(max(1, len(self._receivers)))
+        self._index = -1
+        self._clear_rows()
+
         if not self._receivers:
-            self.table.setItem(0, 0, QTableWidgetItem("没有需要添加的接收器"))
-            self.table.setItem(0, 1, QTableWidgetItem(""))
+            empty = QLabel("没有需要添加的设备")
+            empty.setObjectName("DiagEmpty")
+            empty.setAlignment(Qt.AlignCenter)
+            self.list_lay.addWidget(empty)
+            self.list_lay.addStretch(1)
             self.tip.setText("已连接的无线设备都能读到电量")
             self.add_btn.setEnabled(False)
             return
-        for i, item in enumerate(self._receivers):
-            self.table.setItem(i, 0, QTableWidgetItem(item["name"]))
-            self.table.setItem(i, 1, QTableWidgetItem(item["vid_pid"]))
-        self.table.selectRow(0)
 
-    def _receiver(self) -> dict | None:
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not rows:
-            return None
-        index = rows[0].row()
-        if 0 <= index < len(self._receivers):
-            return self._receivers[index]
-        return None
+        for index, receiver in enumerate(self._receivers):
+            row = PickRow(receiver["name"], receiver["vid_pid"], receiver.get("kind") or "")
+            row.picked.connect(lambda i=index: self.pick(i))
+            self.list_lay.addWidget(row)
+            self._rows.append(row)
+        self.list_lay.addStretch(1)
+        self.pick(0)
 
-    def _on_receiver(self) -> None:
-        receiver = self._receiver()
-        if receiver is None:
+    def pick(self, index: int) -> None:
+        if not (0 <= index < len(self._receivers)):
             return
+        self._index = index
+        for i, row in enumerate(self._rows):
+            row.set_picked(i == index)
         self._tried.clear()
+        # 换了台接收器，自动探测从零开始，按钮也放开
+        self.probe_btn.setEnabled(True)
+        self.probe_btn.setToolTip("")
+        receiver = self._receivers[index]
         guesses = receiver.get("guesses") or []
         if guesses:
-            index = self.combo.findData(guesses[0])
-            if index >= 0:
-                self.combo.setCurrentIndex(index)
+            combo_index = self.combo.findData(guesses[0])
+            if combo_index >= 0:
+                self.combo.setCurrentIndex(combo_index)
                 return
         self.combo.setCurrentIndex(0)
 
+    def _receiver(self) -> dict | None:
+        if 0 <= self._index < len(self._receivers):
+            return self._receivers[self._index]
+        return None
+
     # ---------------- 试读 / 探测 ----------------
     def _set_busy(self, busy: bool, text: str = "") -> None:
-        for btn in (self.test_btn, self.probe_btn, self.add_btn):
-            btn.setEnabled(not busy)
+        self.test_btn.setEnabled(not busy)
+        self.probe_btn.setEnabled(not busy)
+        self.scroll.setEnabled(not busy)
+        self.combo.setEnabled(not busy)
         if busy:
+            self.add_btn.setEnabled(False)
             self.tip.setText(text or "正在读取…")
-        self.table.setEnabled(not busy)
+        else:
+            # 只有试读通了才允许添加：没读到电量就写盘，加进去也是一台"读不到"
+            self.add_btn.setEnabled(bool((self._result or {}).get("ok")))
 
     def _test(self) -> None:
         receiver = self._receiver()
@@ -247,11 +288,16 @@ class AddDeviceWindow(QDialog):
         self._worker.start()
 
     def _on_done(self, result: dict) -> None:
-        self._set_busy(False)
         self._result = result
+        self._set_busy(False)
         self.tip.setText(result.get("text") or "")
         for pid in result.get("tried_ids") or []:
             self._tried.add(pid)
+        # 这台接收器能试的都试完了：再点「自动探测」只会空转（以前就是
+        # 点一次"试了 0 条"、再点一次还是"试了 0 条"），直接停掉并指路
+        if result.get("job") == "probe" and not result.get("remaining"):
+            self.probe_btn.setEnabled(False)
+            self.probe_btn.setToolTip("这台接收器上可试的协议都试过了，请从型号里选")
         profile = result.get("profile")
         if result.get("ok") and profile is not None:
             index = self.combo.findData(profile["id"])
@@ -294,11 +340,10 @@ class AddDeviceWindow(QDialog):
             except Exception:
                 pass
 
-        self.tip.setText(f"已添加 · {label}（{result.get('text') or ''}）")
+        self.tip.setText(f"已添加 · {label}")
         self.added.emit()
         # 加完就把它从"待添加"里去掉，列表不该还挂着刚加过的那台
         self._known.add(receiver["vid_pid"].upper())
-        self._receivers = []
         self.reload()
 
     # ---------------- 关闭 ----------------

@@ -2,7 +2,7 @@
 """按芯片方案读电量，不按品牌白名单。
 
 同一套只读查询覆盖一整批贴牌：Compx 的 17 字节帧、中颖/万灵那条
-特征报告、雷蛇 0x07/0x80、华硕 12 07、雷柏主动上报、VAXEE、
+特征报告、雷蛇 0x07/0x80、华硕 12 07、VAXEE、
 八位堂和索尼手柄的标准输入报告，再加上 Nordic 54、赛睿、JBL、
 飞智和迈从 G7。帧对不上就跳过，不显示假电量。
 """
@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover
 
 import brands
 from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
-from providers import proto
+from providers import packs, proto
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
 
@@ -25,7 +25,10 @@ from providers.hidpath import is_bluetooth, phys_token
 _FAIL: dict[tuple, float] = {}
 _FAIL_FOR = 90.0
 
-_SONY_PIDS = {0x0CE6, 0x0DF2, 0x05C4, 0x09CC, 0x0BA0}
+_SONY_PIDS = {0x05C4, 0x09CC, 0x0BA0}   # DualShock 4；DualSense 只有蓝牙/有线，不做
+
+# 已有出处、且已搬进「协议包」的雷蛇型号：这里不再用"轮流猜事务号"去碰它们。
+_RAZER_VERIFIED_PIDS = {0x00E6, 0x00E5, 0x00DF, 0x0555, 0x056C}
 
 
 def _cooled(key: tuple, force: bool) -> bool:
@@ -237,6 +240,12 @@ def _try_feature83(members, vid, force) -> tuple[float, bool] | None:
 def _try_razer(members, vid, force) -> tuple[float, bool] | None:
     if vid != 0x1532:
         return None
+    # 已适配型号（毒蝰 V4 Pro、Viper V3 Pro SE、BlackShark V2 Pro、Kraken V4）
+    # 全部交给「协议包」里的 OpenRazer/Synapse 原版实现：那几条会按型号表选事务号、
+    # 校验应答头与 XOR，这里的"四个事务号轮流猜"只留给没有出处的型号。
+    if any(pid in _RAZER_VERIFIED_PIDS for pid in {
+            i.get("product_id") or 0 for i in members}):
+        return None
     # 毒蝰这类 2.4G 鼠标把 90 字节电量报告放在鼠标集合上，不在厂商页。
     vendor = [i for i in members if (i.get("usage_page") or 0) >= 0xFF00]
     mouse = [i for i in members
@@ -295,28 +304,6 @@ def _try_asus(members, vid, force) -> tuple[float, bool] | None:
                     hit = _read_until(dev, 0.2, proto.parse_asus, 64)
                     if hit is not None:
                         return hit
-        except Exception:
-            continue
-        finally:
-            _close(dev)
-    _mark_fail(key)
-    return None
-
-
-def _try_rapoo(members, vid, force) -> tuple[float, bool] | None:
-    if vid != 0x24AE:
-        return None
-    targets = [i for i in members if (i.get("usage_page") or 0) >= 0xFF00] or members[:1]
-    key = ("rapoo", phys_token(targets[0]["path"]))
-    if _cooled(key, force):
-        return None
-    for info in targets[:2]:
-        dev = None
-        try:
-            dev = _open(info["path"])
-            hit = _read_until(dev, 1.6, proto.parse_rapoo, 32)
-            if hit is not None:
-                return hit
         except Exception:
             continue
         finally:
@@ -387,17 +374,18 @@ def _try_gamepad(members, vid, pid, force) -> tuple[float, bool] | None:
     eight = vid == 0x2DC8
     if not sony and not eight:
         return None
-    targets = [i for i in members
-               if (i.get("usage_page") or 0) in (0x0001, 0xFF00)]
+    # 蓝牙连接的手柄同样跳过（只做 2.4G 与 USB 有线）
+    wired = [i for i in members if not is_bluetooth(i.get("path"))]
+    if not wired:
+        return None
+    targets = [i for i in wired if (i.get("usage_page") or 0) in (0x0001, 0xFF00)]
     if not targets:
-        targets = members[:1]
+        targets = wired[:1]
     key = ("pad", phys_token(targets[0]["path"]))
     if _cooled(key, force):
         return None
 
     def _parse(data: bytes):
-        if sony and pid in (0x0CE6, 0x0DF2):
-            return proto.parse_dualsense(data)
         if sony:
             return proto.parse_ds4(data)
         return proto.parse_8bitdo(data)
@@ -584,7 +572,6 @@ def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
         ("厂商电量", lambda m, v, p: _try_feature83(m, v, force)),
         ("Razer 电量", lambda m, v, p: _try_razer(m, v, force)),
         ("华硕 电量", lambda m, v, p: _try_asus(m, v, force)),
-        ("雷柏 电量", lambda m, v, p: _try_rapoo(m, v, force)),
         ("VAXEE 电量", lambda m, v, p: _try_vaxee(m, v, force)),
         ("怒喵 电量", lambda m, v, p: _try_ajazz(m, v, force)),
         ("手柄电量", lambda m, v, p: _try_gamepad(m, v, p, force)),
@@ -595,6 +582,15 @@ def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
         ("迈从 电量", lambda m, v, p: _try_mchose_g7(m, v, force)),
     )
     for (vid, pid, phys), members in groups.items():
+        # 协议包（已验证的厂商私有协议）优先：这组接口被它认领时，本通道整组让位。
+        # 否则两套代码会同时打开同一句柄抢应答帧，表现成"偶尔读得到、偶尔读不到"。
+        try:
+            if packs.owns(vid, pid, members, phys):
+                if debug is not None:
+                    debug.append(f"[芯片组] {vid:04X}:{pid:04X} 已由协议包接管，跳过")
+                continue
+        except Exception:
+            pass
         name = _product_name(members, vid, pid)
         kind = _kind(members, name)
         for source, fn in probes:

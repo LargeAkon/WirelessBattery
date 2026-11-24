@@ -207,6 +207,16 @@ class ToggleSwitch(QAbstractButton):
         self._anim.setEndValue(1.0 if on else 0.0)
         self._anim.start()
 
+    def snap(self, on: bool) -> None:
+        """立刻跳到最终位置，不播滑动动画。
+
+        用在"切换本身已经由外层动效呈现"的场合（毛玻璃开关外面套着圆形
+        揭开）：knob 慢悠悠滑 180ms，而揭开要 560ms 才结束，用户会觉得
+        按钮根本没动、非要等效果走完才切换。先到位，按钮就是随点随切。
+        """
+        self._anim.stop()
+        self.set_knob(1.0 if on else 0.0)
+
     def get_knob(self) -> float:
         return self._pos
 
@@ -472,11 +482,16 @@ class ElidedLabel(QLabel):
 
 
 class DeviceIconTile(QWidget):
-    """设备图标磁贴：淡墨底 + 线性图标。"""
+    """设备图标磁贴：淡墨底 + 线性图标。
 
-    def __init__(self, device: Device, parent=None):
+    dim=True 用于"读不到电量"的行：底色与图标一起压暗，一眼就是次要信息，
+    不必再靠一行灰字去说明。
+    """
+
+    def __init__(self, device, dim: bool = False, parent=None):
         super().__init__(parent)
         self.device = device
+        self.dim = dim
         self.setFixedSize(34, 34)
 
     def paintEvent(self, event) -> None:
@@ -490,8 +505,11 @@ class DeviceIconTile(QWidget):
         p.setBrush(theme.ink_soft_color())
         p.drawPath(path)
 
-        icons.draw_kind(p, self.device.kind, r.adjusted(7, 7, -7, -7),
-                        theme.TEXT, 1.4)
+        ink = theme.color(theme.TEXT_DIM) if self.dim else theme.TEXT
+        if self.dim:
+            p.setOpacity(0.62)
+        icons.draw_kind(p, self.device.kind, r.adjusted(7, 7, -7, -7), ink, 1.4)
+        p.setOpacity(1.0)
         p.end()
 
 

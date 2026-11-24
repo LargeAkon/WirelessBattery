@@ -37,7 +37,8 @@ print("card size (settings):", card.size())
 card.hide()
 
 diag = DiagWindow(config)
-print("diag endpoints:", len(diag.endpoints))
+diag.update_devices(devices, [])
+print("diag pages:", diag.stack.count(), "rows:", diag.list_lay.count())
 
 t0 = time.time()
 scanner = Scanner(config)

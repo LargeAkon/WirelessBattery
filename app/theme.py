@@ -29,7 +29,6 @@ _PALETTES = {
         "INK_SOFT":      "rgba(255,255,255,0.065)",
         "TRACK":         "rgba(255,255,255,0.10)",
         "HOVER":         "rgba(255,255,255,0.045)",
-        "SHADOW_ALPHA":  200,
         # 毛玻璃：染色刻意压得薄，背后影像才透得出来
         "CARD_FILL":     "rgba(16,17,21,0.66)",
         "CARD_STROKE":   "rgba(255,255,255,0.16)",
@@ -57,7 +56,6 @@ _PALETTES = {
         "INK_SOFT":      "rgba(0,0,0,0.05)",
         "TRACK":         "rgba(0,0,0,0.085)",
         "HOVER":         "rgba(0,0,0,0.035)",
-        "SHADOW_ALPHA":  88,
         # 霜化层用的"白"不能是纯白：卡片多半弹在浅色窗口上，纯白等于没有材质。
         # 这里压成带一点冷灰的白（≈ #EEF0F6），玻璃才会从白页面上"浮"出来
         # ——苹果的浅色材质在纯白背景下也是这个思路。
@@ -83,7 +81,6 @@ STROKE = STROKE_STRONG = ""
 TEXT = TEXT_SUB = TEXT_DIM = ""
 INK = ON_INK = INK_SOFT = TRACK = HOVER = ""
 CARD_FILL = CARD_STROKE = ""
-SHADOW_ALPHA = 0
 ACCENT = ACCENT_SOFT = OK = WARN = CRIT = ""
 CHARGE = CHARGE_DEEP = CHARGE_TRACK = CHARGE_BOLT = ""
 
@@ -328,6 +325,58 @@ def qss() -> str:
     #DiagStep {{
         font-size: 13px;
         color: {TEXT_SUB};
+    }}
+    /* 诊断结果 / 接收器列表的一行：无框、无表头，靠留白分开 */
+    #Row {{
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+    }}
+    #PickRow {{
+        background: {CHIP_BG};
+        border: 1px solid {STROKE};
+        border-radius: 10px;
+    }}
+    #PickRow:hover {{
+        border: 1px solid {STROKE_STRONG};
+    }}
+    #PickRow[picked="true"] {{
+        background: {INK_SOFT};
+        border: 1px solid {INK};
+    }}
+    #RowName {{
+        font-size: 13px;
+        font-weight: 600;
+        color: {TEXT};
+    }}
+    #RowSub {{
+        font-size: 11px;
+        color: {TEXT_DIM};
+    }}
+    #RowState {{
+        font-size: 12px;
+        font-weight: 600;
+        color: {TEXT_SUB};
+    }}
+    #RowStateDim {{
+        font-size: 11px;
+        color: {TEXT_DIM};
+    }}
+    #DiagEmpty {{
+        font-size: 12px;
+        color: {TEXT_DIM};
+    }}
+    /* 次要动作（添加设备 / 导出报告）：纯文字，不加框 */
+    QPushButton#Link {{
+        background: transparent;
+        border: none;
+        color: {TEXT_SUB};
+        font-size: 12px;
+        padding: 2px 4px;
+        text-align: right;
+    }}
+    QPushButton#Link:hover {{
+        color: {TEXT};
     }}
     /* 主操作按钮：诊断页只有这一个动作，用实心墨块顶在最显眼处 */
     QPushButton#Primary {{

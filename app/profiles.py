@@ -630,9 +630,51 @@ def read_model_code(paths: list) -> int | None:
 
 # ---------------- 自动探测 ----------------
 
+def candidates_for(usage_page: int, usage: int, skip: set | None = None,
+                   vid_pid: str = "") -> list[dict]:
+    """某条厂商页上值得试的协议，按优先级排好。
+
+    顺序：页面 + 用法都对上的 → 同页面别的用法（应答可能落在另一条集合）
+    → 只声明了页面的通配协议。同一档里，`known_ids` 就写着这台接收器
+    VID:PID 的排最前 —— 同族协议（ATK/VGN/WOB 共用帧）能读到但标签是错的，
+    先把"本来就登记过这台设备"的型号试出来，标签才不至于张冠李戴。
+
+    探测与"还剩多少条"共用这一份规则，免得文案承诺的条数和真正能试的
+    条数对不上。
+    """
+    skip = set(skip or ())
+    vid, _, pid = (vid_pid or "").upper().partition(":")
+
+    def known_first(item: dict) -> bool:
+        if not vid or not pid:
+            return False
+        for entry in item.get("known_ids") or []:
+            if (str(entry.get("vid") or "").upper() == vid
+                    and str(entry.get("pid") or "").upper() == pid):
+                return True
+        return False
+
+    same, other, wildcard = [], [], []
+    for item in load().values():
+        page = item["match"].get("usage_page") or 0
+        if page >= 0xFF00 and page != usage_page:
+            continue
+        matched = item["match"].get("usage")
+        if matched is None:
+            wildcard.append(item)
+        elif matched == usage:
+            same.append(item)
+        else:
+            other.append(item)
+    ordered: list[dict] = []
+    for group in (same, other, wildcard):
+        ordered.extend(sorted(group, key=lambda p: (not known_first(p), p["id"])))
+    return [p for p in ordered if p["id"] not in skip]
+
+
 def probe(infos: list, usage_page: int, usage: int, stop=None,
           progress=None, skip: set | None = None,
-          budget: float = 25.0) -> dict:
+          budget: float = 25.0, vid_pid: str = "") -> dict:
     """协议未知时轮试全部模板（诊断页「自动探测」）。
 
     命中条件：读到电量后隔 200ms 再读一次，两次相差 ≤8 才算
@@ -642,27 +684,9 @@ def probe(infos: list, usage_page: int, usage: int, stop=None,
     下一次接着往后试），单条模板的超时压到 2 秒 —— 全 57 条 × 4.5 秒，
     用户会以为卡死。
     """
-    table = load()
     base = list(infos)
-    skip = skip or set()
-    same, other, wildcard = [], [], []
-    for item in table.values():
-        page = item["match"]["usage_page"]
-        if page >= 0xFF00 and page != usage_page:
-            continue
-        matched = item["match"]["usage"]
-        if matched is None:
-            wildcard.append(item)
-        elif matched == usage:
-            same.append(item)
-        else:
-            other.append(item)
-    # 先试「页面 + 用法都对上」的，再试同页面别的用法（应答可能落在另一条集合），
-    # 最后试只声明了页面的通配协议
-    candidates = []
-    for group in (same, other, wildcard):
-        candidates.extend(sorted(group, key=lambda p: p["id"]))
-    candidates = [p for p in candidates if p["id"] not in skip]
+    skip = set(skip or ())
+    candidates = candidates_for(usage_page, usage, skip, vid_pid)
 
     started = time.monotonic()
     tried_ids: list[str] = []

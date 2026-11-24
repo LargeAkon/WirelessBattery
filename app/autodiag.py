@@ -453,7 +453,23 @@ def auto_probe(receiver: dict, progress: Progress | None = None,
         if pair not in pages:
             pages.append(pair)
 
-    for page, usage in pages[:3]:
+    # 每页还剩多少条没试，条数多的页先试。
+    # 之前固定只试 pages[:3]：前三页试完后，每次点击都在空页上跑，
+    # 于是"试了 0 条"却还报"还剩 50 条"——那 50 条声明的是别的厂商页，
+    # 在这台接收器上根本发不出去，用户永远点不完。现在按剩余量轮换，
+    # 并且"还剩多少"只数这台接收器上真正能试的。
+    todo: list[tuple[int, int, int]] = []
+    reachable: set[str] = set()
+    for page, usage in pages:
+        ids = [p["id"] for p in profiles.candidates_for(
+            page, usage, vid_pid=receiver.get("vid_pid") or "")]
+        reachable.update(ids)
+        left_ids = [i for i in ids if i not in skip]
+        if left_ids:
+            todo.append((len(left_ids), page, usage))
+    todo.sort(key=lambda item: -item[0])
+
+    for _left, page, usage in todo[:3]:
         if stop is not None and stop.is_set():
             break
         result = profiles.probe(
@@ -461,6 +477,7 @@ def auto_probe(receiver: dict, progress: Progress | None = None,
             stop=stop,
             progress=(lambda text: _say(progress, text, 60)) if progress else None,
             skip=skip, budget=budget,
+            vid_pid=receiver.get("vid_pid") or "",
         )
         tried.extend(result.get("tried_ids") or [])
         skip.update(result.get("tried_ids") or [])
@@ -471,16 +488,24 @@ def auto_probe(receiver: dict, progress: Progress | None = None,
                 f"读到 {result['level']:.0f}%" + ("（充电中）" if result["charging"] else ""))
         return {"ok": True, "profile": profile, "level": result["level"],
                 "charging": result["charging"], "text": text,
-                "usage_page": page, "usage": usage, "tried_ids": tried}
+                "usage_page": page, "usage": usage, "tried_ids": tried,
+                "remaining": 0}
 
-    left = len([p for p in profiles.load() if p["id"] not in skip])
-    if left:
+    left = len(reachable - skip)
+    if not reachable:
+        text = ("这台接收器的厂商页上没有可试的内置协议 —— "
+                "请从上面的型号里手动选一个再「试读」")
+    elif left:
         text = (f"试了 {len(tried)} 条还没中，还剩 {left} 条 —— "
                 f"再点一次「自动探测」接着试")
+    elif tried:
+        text = (f"这台接收器能试的 {len(reachable)} 条都试过了，没有一条能读"
+                f"（多为私有帧）—— 从上面的型号里选一个再「试读」，或导出报告")
     else:
-        text = (f"{len(tried)} 条协议都试过了，没有一条能读（多半是私有帧，"
-                f"需要抓包补协议）")
-    return {"ok": False, "profile": None, "text": text, "tried_ids": tried, "remaining": left}
+        text = (f"这台接收器上能试的 {len(reachable)} 条之前都试过了"
+                f"—— 从上面的型号里选一个再「试读」，或导出报告")
+    return {"ok": False, "profile": None, "text": text, "tried_ids": tried,
+            "remaining": left}
 
 
 def remember(receiver: dict, profile: dict, usage_page: int, usage: int,
@@ -520,7 +545,7 @@ def summary(result: dict) -> str:
     if ok and not bad:
         return f"识别到 {ok} 台设备，用时 {seconds:.1f} 秒"
     if ok and bad:
-        return f"识别到 {ok} 台设备，另有 {bad} 台读不到（原因见下表，可点「添加设备」指定型号）"
+        return f"识别到 {ok} 台设备 · 另有 {bad} 台读不到，可点「添加设备」指定型号"
     if bad:
         return f"当前 {bad} 台接收器都读不到电量，点「添加设备」可手动指定型号"
     return "没有发现无线外设，确认接收器插好、设备已开机再试一次"

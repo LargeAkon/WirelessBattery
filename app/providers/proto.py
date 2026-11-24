@@ -257,18 +257,6 @@ def parse_asus(data: bytes) -> tuple[float, bool] | None:
     return None
 
 
-def parse_rapoo(data: bytes) -> tuple[float, bool] | None:
-    """``BB B0`` 主动上报。前面若多一个报告号，电量字节跟着后移。"""
-    for start in (0, 1):
-        if len(data) < start + 7 or data[start] != 0xBB or data[start + 1] != 0xB0:
-            continue
-        level = data[start + 6]
-        if not 0 <= level <= 100:
-            continue
-        return float(level), data[start + 5] == 0x02
-    return None
-
-
 def vaxee_request(command: int) -> bytes:
     buf = bytearray(64)
     buf[0] = 0x0E
@@ -296,18 +284,6 @@ def parse_ajazz_status(data: bytes) -> float | None:
     if not 1 <= level <= 100:
         return None
     return float(level)
-
-
-def parse_dualsense(data: bytes) -> tuple[float, bool] | None:
-    """USB 输入报告 0x01 的第 53 字节。低 4 位是 0–10 档。"""
-    if len(data) < 54 or data[0] != 0x01:
-        return None
-    raw = data[53]
-    level = raw & 0x0F
-    state = (raw & 0xF0) >> 4
-    if level > 10:
-        return None
-    return float(min(100, level * 10)), state in (1, 2)
 
 
 def parse_ds4(data: bytes) -> tuple[float, bool] | None:

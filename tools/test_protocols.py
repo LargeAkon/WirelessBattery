@@ -183,20 +183,19 @@ def test_descriptor() -> None:
 
 def test_merge() -> None:
     scanner = Scanner(Config())
-    mouse = Device(key="v1", name="HID-compliant mouse", kind=MOUSE, level=10,
-                   source="系统电池", vid_pid="3554:F508", raw={"instance": "A"})
-    keyboard = Device(key="v2", name="HID-compliant keyboard", kind=KEYBOARD, level=20,
-                      source="系统电池", vid_pid="3554:F508", raw={"instance": "B"})
-    vendor = Device(key="v3", name="VXE R1", kind=MOUSE, level=33,
+    # 「添加设备」写的协议与专用通道读到同一只接收器：只留专用通道那条
+    manual = Device(key="m1", name="VXE R1", kind=MOUSE, level=30,
+                    source="已添加·VXE", vid_pid="3554:F508", raw={"phys": "P"})
+    native = Device(key="n1", name="VXE R1", kind=MOUSE, level=33,
                     source="Compx 电量", vid_pid="3554:F508", raw={"phys": "P"})
-    kept = scanner._dedupe_channels([mouse, keyboard, vendor], [])
-    names = {d.name for d in kept}
-    _check("keep sibling keyboard", names == {"VXE R1", "HID-compliant keyboard"})
+    kept = scanner._dedupe_channels([manual, native], [])
+    _check("drop added copy", [d.key for d in kept] == ["n1"])
 
+    # 同一型号的两只接收器各留一条
     a = Device(key="a", name="USB Receiver", kind=MOUSE, level=1,
-               source="HID 电量", vid_pid="258A:1007", raw={"phys": "one"})
+               source="协议包·VGN", vid_pid="258A:1007", raw={"phys": "one"})
     b = Device(key="b", name="USB Receiver", kind=MOUSE, level=2,
-               source="HID 电量", vid_pid="258A:1007", raw={"phys": "two"})
+               source="协议包·VGN", vid_pid="258A:1007", raw={"phys": "two"})
     merged = scanner._merge([a, b], [])
     _check("two receivers stay", len(merged) == 2)
 

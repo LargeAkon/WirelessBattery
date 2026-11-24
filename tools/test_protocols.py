@@ -9,7 +9,7 @@ APP = Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP))
 
 from model import Device, KEYBOARD, MOUSE  # noqa: E402
-from providers import proto  # noqa: E402
+from providers import proto, raw_hid  # noqa: E402
 from providers.hid_desc import extract_bits, parse_battery_fields, to_percent  # noqa: E402
 from scanner import Scanner  # noqa: E402
 from config import Config  # noqa: E402
@@ -181,6 +181,16 @@ def test_descriptor() -> None:
     _check("wide scale", to_percent(255, 255) == 100.0)
 
 
+def test_endpoints() -> None:
+    """端点角色表不依赖设备，纯函数 —— 常量和函数一起被删过一次。"""
+    _check("role vendor long", raw_hid._role_of(0xFF02, 0x0002) == "厂商协议·长报文")
+    _check("role vendor short", raw_hid._role_of(0xFF00, 0x0001) == "厂商协议·短报文")
+    _check("role vendor other", raw_hid._role_of(0xFF05, 0x0003) == "厂商协议")
+    _check("role standard mouse", raw_hid._role_of(0x0001, 0x0002) == "鼠标")
+    _check("role standard keyboard", raw_hid._role_of(0x0001, 0x0006) == "键盘")
+    _check("role fallback", raw_hid._role_of(0x0003, 0x0009) == "标准用途")
+
+
 def test_merge() -> None:
     scanner = Scanner(Config())
     # 「添加设备」写的协议与专用通道读到同一只接收器：只留专用通道那条
@@ -209,5 +219,6 @@ if __name__ == "__main__":
     test_hyperx()
     test_brand_frames()
     test_descriptor()
+    test_endpoints()
     test_merge()
     print("ALL OK")

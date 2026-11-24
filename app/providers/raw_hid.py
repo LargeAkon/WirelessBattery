@@ -84,6 +84,25 @@ def _collect(path: bytes, seconds: float, query: str,
     return collected, error
 
 
+_USAGE_ROLE = {
+    (0x0001, 0x0001): "指针",
+    (0x0001, 0x0002): "鼠标",
+    (0x0001, 0x0004): "摇杆",
+    (0x0001, 0x0005): "游戏手柄",
+    (0x0001, 0x0006): "键盘",
+    (0x0001, 0x0007): "小键盘",
+    (0x0001, 0x0080): "系统控制",
+    (0x0002, 0x0001): "仿真设备",
+    (0x0006, 0x0001): "扫描仪",
+    (0x0007, 0x0001): "传感器",
+    (0x0009, 0x0001): "HID 设备",
+    (0x000B, 0x0001): "遥控",
+    (0x000C, 0x0001): "多媒体键",
+    (0x000D, 0x0001): "数字化仪",
+    (0x000D, 0x0002): "笔",
+}
+
+
 def _role_of(usage_page: int, usage: int) -> str:
     page = usage_page or 0
     use = usage or 0

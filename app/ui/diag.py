@@ -28,6 +28,7 @@ import theme
 from config import APP_VERSION, Config
 from model import Device
 from providers import raw_hid, xinput_pad
+from ui.adddevice import AddDeviceWindow
 from vendors import describe as describe_vendor
 
 
@@ -48,6 +49,11 @@ class AutoDiagWorker(QThread):
 
     def run(self) -> None:
         try:
+            if self.mode == "refresh":
+                result = autodiag.scan_only(self.config)
+                result["mode"] = self.mode
+                self.done.emit(result)
+                return
             result = autodiag.run(
                 self.config,
                 progress=lambda text, pct: self.progress.emit(text, pct),
@@ -169,6 +175,12 @@ class DiagWindow(QWidget):
         self.head.setObjectName("DiagTitle")
         header.addWidget(self.head)
         header.addStretch(1)
+        self.add_btn = QPushButton("添加设备")
+        self.add_btn.setObjectName("Ghost")
+        self.add_btn.setCursor(Qt.PointingHandCursor)
+        self.add_btn.setFixedHeight(34)
+        self.add_btn.clicked.connect(self._open_add)
+        header.addWidget(self.add_btn)
         self.btn = QPushButton("开始自动诊断")
         self.btn.setObjectName("Primary")
         self.btn.setCursor(Qt.PointingHandCursor)
@@ -269,6 +281,7 @@ class DiagWindow(QWidget):
     def _set_busy(self, busy: bool, text: str = "") -> None:
         self.btn.setEnabled(not busy)
         self.btn.setText("识别中…" if busy else "开始自动诊断")
+        self.add_btn.setEnabled(not busy)
         self.export_btn.setEnabled(not busy)
         self.bar.setVisible(busy)
         if busy:
@@ -329,11 +342,25 @@ class DiagWindow(QWidget):
         if result.get("mode") == "report":
             self._write_report(result)
             return
+        if result.get("mode") == "refresh":
+            # 添加设备后只刷新列表，失败表还是上一轮的结论
+            self.rule_changed.emit()
+            return
 
         self.status.setText(autodiag.summary(result))
         # 诊断结果要立刻反映到卡片上：本轮的规则已经写进配置，
         # 让主窗口重新扫一遍就能出现在列表里。
         self.rule_changed.emit()
+
+    # ---------------- 添加设备 ----------------
+    def _open_add(self) -> None:
+        if self.busy:
+            return
+        known = {d.vid_pid.upper() for d in self._devices if d.vid_pid}
+        window = AddDeviceWindow(self.config, known, self)
+        window.added.connect(lambda: self._run("refresh"))
+        window.setAttribute(Qt.WA_DeleteOnClose, True)
+        window.exec()
 
     # ---------------- 表格 ----------------
     def update_devices(self, devices: list[Device], debug: list[str]) -> None:

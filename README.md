@@ -53,6 +53,8 @@
 | **休眠不丢** | 设备断连时保留上次读数并标「信号中断」，不会一闪一闪地跳没 |
 | **刷新策略** | 常规 10 / 15 / 20 分钟；检测到充电自动加密到 30 秒 |
 | **一键诊断** | 点一下自动识别全部端点，能读的设备直接加进列表；读不到的写明原因 |
+| **手动添加** | 诊断页「添加设备」：选接收器 → 选品牌型号（可搜索）→ 试读 → 添加，存成外置协议 |
+| **协议库** | 内置 57 条厂商协议 / 28 个品牌组，命中即按型号显示；未命中可自动探测 |
 | **开机自启** | 写 HKCU 注册表，无需管理员权限，卸载时自动清理 |
 
 ---
@@ -82,12 +84,30 @@
 | **HID 标准电池集合** | 描述符里带 Battery Strength 的设备：西伯利亚、iKF、阿斯盾、漫步者 HECATE 等 |
 | **XInput** | Xbox 手柄，以及走 XInput 的飞智、LEADJOY（四档电量，插线供电时不报） |
 | **Windows 电池类 / 设备属性** | 系统为其注册了电池设备或能报告 BatteryLevel 的外设 |
+| **协议库（品牌精确 ID）** | 见下表，按 `VID:PID` 精确匹配到型号 |
 | **自定义规则** | 诊断时自动从接收器上报帧里识别出的私有格式，存成规则后随刷新读取 |
 
 表中除「雷柏 / JBL / 八位堂 / 索尼 / HID 标准电池集合」是设备主动上报、「XInput / Windows 电池类」走系统接口外，其余都是程序主动发一帧查询。
 
 > **列表里少一行，也不给假数字。**
 > 解析不出确切百分比就不列出该设备，不显示 `--`，也不猜一个值。
+
+**协议库覆盖**
+
+| 品牌 | 型号 |
+|---|---|
+| VXE | V3 NK / R1 Nearlink、R1 Pro Max / R1 SE |
+| ATK | F1 Pro Max / F1 V3 / F1 Ultimate、F1 Moba F503、A9 Air 大师+、Z87 系键盘、A87 Pro、V75X、N9V2 Ultimate 耳机、Nordic 54 鼠标 |
+| VGN | 北影键盘、蜻蜓 Dragonfly3 SE、F1 Pro（4K）、F2 大师+、F1 V5 Turbo+、V98 Pro、ryMs 接收器（3 Pro Max / Y2 V2 Pro Max / F1 V2 Pro Max / 3 Ultra / F1 V5 Ultra / F2 V2 Ultra） |
+| 迈丛 MCHOSE | G75 Pro / Z75S / K99 / GX87 / G75 键盘、A7 V3 Pro / Ultra+、V9 Turbo+ 耳机、G7 |
+| 凌豹 Lingbao | K98 键盘、M1 Pro、M5PRO Max |
+| 狼蛛 AULA | F99 Pro、F108 Pro |
+| LEOBOG | Hi75c Pro、HI98PRO |
+| 钛度 / IMECOO | TSG809、HJSDZHI S1-V2、P1 |
+| 华硕 ROG | AZOTH 系 Omni 键盘、HARPE / KERIS Omni、Keris AimPoint、SPEEDNOVA 8K、PELTA / DELTA II 耳机 |
+| HyperX | Cloud II Wireless、Cloud III / II Core、Cloud III S（`03F0:02CC`）、Alpha 2、Alpha Wireless |
+| 漫步者 HECATE | G3M Pro、G5M Pro |
+| 其他 | 达尔优 A950 AIR V2、西伯利亚 T7 / T7 GT、Pulsar X2 / Link 8K、Scyrox 8K、Hitscan Hyperlight、CROCIRIS X7、CHERRY MX 2.0S WL Pro、水月雨 GM01 Pro、高斯 GS3104T-Pro、寸渊影弑 SHADOW、前行者 S9 PRO、多彩 GH8K / M900 Ultra、北通 KP40D、VAXEE / ZYGEN |
 
 **暂不支持**
 
@@ -97,7 +117,7 @@
 | 无电量接口的公版接收器（如 `258A:1007`） | 固件里没有电量字段 |
 | 任天堂手柄 | USB / 蓝牙，不走 2.4G 接收器 |
 | Xbox 手柄的精确百分比 | XInput 只给四档（5 / 25 / 60 / 100） |
-| Lofree、IPI、EPOS 等 | 私有帧还没有样本，见[适配流程](#适配新设备) |
+| Lofree、IPI、EPOS 等 | 私有帧还没有样本，可用诊断页「添加设备 → 自动探测」尝试 |
 | 其余未覆盖品牌 | 按方案商适配，覆盖面随 Issues 里的报告增长 |
 
 ---
@@ -129,7 +149,7 @@ cd app && python main.py
 | 立即刷新 | 跳过冷却，强制重读所有通道 |
 | 打开设置 | 刷新间隔、主题、毛玻璃、自启动 |
 | 开机自启动 | 勾选即写注册表 |
-| 设备诊断 | 一键自动识别 + 导出报告 |
+| 设备诊断 | 一键自动识别、添加设备、导出报告 |
 | 退出 | 完全退出 |
 
 卡片上点设备可以改类型和显示名，识别错名字时用。
@@ -141,8 +161,9 @@ cd app && python main.py
 这是最需要的贡献方式。手上有读不到电量的设备时：
 
 1. <kbd>右键</kbd>托盘 → **设备诊断** → **开始自动诊断**
-2. 等进度条走完（通常 3~10 秒）：读到的设备直接列出，读不到的写明原因
-3. 点 **导出诊断报告**，把桌面上生成的 txt 发到 [Issues](https://github.com/LargeAkon/WirelessBattery/issues)
+2. 还读不到，点 **添加设备**：左边选中那台接收器，右边从品牌型号里选自己的设备，点 **试读**
+3. 不知道型号就点 **自动探测**，程序会逐条试协议库里的模板，两次读数一致才算命中
+4. 仍不行再点 **导出诊断报告**，把桌面上的 txt 发到 [Issues](https://github.com/LargeAkon/WirelessBattery/issues)
 
 报告里每个端点都标注了所属方案商（例如 `0C45 → Sonix 松翰公版`），并附上接收器原始上报帧，据此能判断该补哪家协议，而不是按型号瞎猜。
 
@@ -161,6 +182,8 @@ python build.py            # → dist/WirelessBatterySetup.exe
 app/
   main.py       托盘、菜单、刷新调度、充电动画
   scanner.py    通道调度 + 合并去重 + 失败缓存
+  profiles.py   协议库引擎：按协议发帧、取偏移、校验回包
+  profiles_data.py  内置 57 条厂商协议（纯数据）
   autodiag.py   一键诊断：全通道扫描 + 端点被动监听 + 自动存规则
   brands.py     品牌 VID → 走哪套电量帧
   vendors.py    芯片与系统设备的方案商对照

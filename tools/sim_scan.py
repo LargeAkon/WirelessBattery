@@ -204,6 +204,13 @@ DEVICES = [
      _out(lambda _r: bytes((0x05, 0x00, 0x00, 49)))),
     ("Akko 鼠标", 0x3151, 0x4011, 0xFF01, 0x0001, 37, "mouse",
      _out(lambda _r: bytes((0x05, 0x00, 0x00, 37)))),
+    # 协议库（品牌精确 ID）通道：帧格式来自各厂商公开协议
+    ("寸渊影弑 SHADOW", 0x3654, 0x6901, 0xFF02, 0x0002, 64, "headset",
+     _out(lambda _r: bytes((0xFE, 0x00, 0x11)) + bytes(7) + bytes((1, 0, 64, 0, 0)))),
+    ("凌豹 M5PRO Max", 0x3151, 0x402D, 0xFFFF, 0x0002, 57, "mouse",
+     _feat(lambda _r: bytes((0x00, 0xF7, 0x00, 57, 0x01, 0x00)) + bytes(59))),
+    ("水月雨 GM01 Pro", 0x35D8, 0x0133, 0xFF02, 0x0002, 50, "headset",
+     _out(lambda _r: bytes((0x4B,)) + bytes(8) + bytes((50,)))),
     ("赛睿 Arctis Nova 7", 0x1038, 0x22A1, 0xFFC0, 0x0001, 76, "headset", _out(_steel(0x22A1))),
     ("赛睿 Aerox 3", 0x1038, 0x1838, 0xFFC0, 0x0001, 64, "mouse", _out(_steel(0x1838))),
     ("JBL Quantum", 0x0ECB, 0x2088, 0xFF13, 0x0001, 90, "headset",

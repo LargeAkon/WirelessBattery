@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Callable
 
+import profiles
 from model import UNKNOWN, Device
 from providers import hidlist, raw_hid
 from providers.oem import _kind as _oem_kind
@@ -69,6 +70,11 @@ def group_endpoints(eps: list[dict]) -> dict[str, list[dict]]:
     for ep in eps:
         out.setdefault(_vid_pid(ep), []).append(ep)
     return out
+
+
+def vendor_endpoints(eps: list[dict]) -> list[dict]:
+    """对外的名字：厂商协议端点（诊断页与添加窗口都要用）。"""
+    return _vendor_eps(eps)
 
 
 def _vendor_eps(eps: list[dict]) -> list[dict]:
@@ -352,6 +358,152 @@ def run(config, progress: Progress | None = None,
     return result
 
 
+def scan_only(config) -> dict:
+    """只跑一遍扫描，不做被动监听。添加设备后刷新列表用（几秒内结束）。"""
+    from scanner import Scanner
+    devices, debug = Scanner(config).scan(with_debug=True, force=True)
+    return {
+        "devices": devices, "failed": [], "rules": 0, "fixed": 0,
+        "endpoints": 0, "seconds": 0.0, "logs": debug, "samples": [], "stopped": False,
+    }
+
+
+# ---------------- 手动添加设备（对应「添加设备」窗口） ----------------
+
+def receivers(known: set[str] | None = None) -> list[dict]:
+    """列出可以手动适配的接收器。
+
+    known 传已经读到电量的 VID:PID；这些默认不列，避免用户又加一遍
+    （窗口上勾「显示全部」时传空集合即可）。
+    """
+    known = {k.upper() for k in (known or set())}
+    with hidlist.shared():
+        eps = raw_hid.describe_endpoints()
+    out: list[dict] = []
+    for vid_pid, group in group_endpoints(eps).items():
+        if vid_pid.upper() in known:
+            continue
+        if not _is_candidate(group):
+            continue
+        name = _display_name(group, vid_pid)
+        out.append({
+            "vid_pid": vid_pid,
+            "name": name,
+            "kind": _kind_of(group, name),
+            "endpoints": group,
+            "paths": [e.get("path") for e in _vendor_eps(group) if e.get("path")],
+            "guesses": [p["id"] for p in profiles.for_ids(*vid_pid.split(":"))],
+        })
+    out.sort(key=lambda r: r["name"].lower())
+    return out
+
+
+def protocol_choices() -> list[dict]:
+    """「选择品牌型号」下拉的条目。"""
+    return profiles.choices()
+
+
+def _pick_profile(receiver: dict, profile_id: str) -> dict | None:
+    if profile_id:
+        return profiles.by_id(profile_id)
+    guesses = receiver.get("guesses") or []
+    if guesses:
+        return profiles.by_id(guesses[0])
+    return None
+
+
+def detect(receiver: dict, profile_id: str = "") -> dict:
+    """试读：按指定协议问一次，返回结果与给用户看的一句话。"""
+    profile = _pick_profile(receiver, profile_id)
+    if profile is None:
+        return {"ok": False, "level": None, "charging": False, "profile": None,
+                "text": "这只接收器没有已知协议，先点「自动探测」"}
+    paths = profiles.order_paths(profile, receiver.get("endpoints") or [])
+    if not paths:
+        return {"ok": False, "level": None, "charging": False, "profile": profile,
+                "text": f"没有可用的接口（协议要 0x{profile['match']['usage_page']:04X} 页面）"}
+    hit = profiles.read(profile, paths)
+    if hit["level"] is None:
+        return {"ok": False, "level": None, "charging": False, "profile": profile,
+                "text": f"没读到：{hit.get('error') or '设备没有应答'}"}
+    text = f"读到 {hit['level']:.0f}%" + ("（充电中）" if hit["charging"] else "")
+    return {"ok": True, "level": hit["level"], "charging": hit["charging"],
+            "profile": profile, "text": text}
+
+
+def auto_probe(receiver: dict, progress: Progress | None = None,
+               stop: threading.Event | None = None,
+               skip: set | None = None,
+               budget: float = 12.0) -> dict:
+    """自动探测：轮试协议库里的全部模板，两次读数接近才算命中。
+
+    只发「已知厂商查询帧」，不往未知端点乱写 —— 帧猜错可能让接收器掉线。
+    一只接收器常同时挂 0xFF00 和 0xFF02 两个厂商页，协议落在哪一页不固定，
+    所以逐页试；每页给 `budget` 秒，到点换下一页，不会把窗口卡住。
+    """
+    eps = vendor_endpoints(receiver.get("endpoints") or [])
+    if not eps:
+        return {"ok": False, "profile": None, "text": "这只接收器没有厂商协议端点"}
+
+    skip = set(skip or ())
+    tried: list[str] = []
+    pages: list[tuple[int, int]] = []
+    for ep in eps:
+        pair = (ep.get("usage_page") or 0, ep.get("usage") or 0)
+        if pair not in pages:
+            pages.append(pair)
+
+    for page, usage in pages[:3]:
+        if stop is not None and stop.is_set():
+            break
+        result = profiles.probe(
+            receiver.get("endpoints") or [], page, usage,
+            stop=stop,
+            progress=(lambda text: _say(progress, text, 60)) if progress else None,
+            skip=skip, budget=budget,
+        )
+        tried.extend(result.get("tried_ids") or [])
+        skip.update(result.get("tried_ids") or [])
+        if not result["ok"]:
+            continue
+        profile = result["profile"]
+        text = (f"命中 {profile['vendor']} · {profile['label']}，"
+                f"读到 {result['level']:.0f}%" + ("（充电中）" if result["charging"] else ""))
+        return {"ok": True, "profile": profile, "level": result["level"],
+                "charging": result["charging"], "text": text,
+                "usage_page": page, "usage": usage, "tried_ids": tried}
+
+    left = len([p for p in profiles.load() if p["id"] not in skip])
+    if left:
+        text = (f"试了 {len(tried)} 条还没中，还剩 {left} 条 —— "
+                f"再点一次「自动探测」接着试")
+    else:
+        text = (f"{len(tried)} 条协议都试过了，没有一条能读（多半是私有帧，"
+                f"需要抓包补协议）")
+    return {"ok": False, "profile": None, "text": text, "tried_ids": tried, "remaining": left}
+
+
+def remember(receiver: dict, profile: dict, usage_page: int, usage: int,
+             name: str = "", kind: str = "") -> tuple[str, str]:
+    """把试读成功的协议固化下来：写外置协议 + 记住名字和类型。
+
+    写的是配置目录 `device_profiles/<id>.json`，下次启动由协议库直接读，
+    不需要再点诊断。
+    """
+    label = (name or "").strip() or profile["label"]
+    profiles.save_external(profile, *receiver["vid_pid"].split(":"),
+                           usage_page=usage_page, usage=usage, label=label)
+
+    # 设备的 key 由通道生成，这里按同样的规则算一遍，改名才能落到这台设备上
+    instance = ""
+    for path in receiver.get("paths") or []:
+        instance = profiles.device_instance(path)
+        break
+    key = f"profile:{profile['id']}:{receiver['vid_pid'].split(':')[0].lower()}:" \
+          f"{receiver['vid_pid'].split(':')[1].lower()}:{instance}"
+    return key, label
+
+
 # ---------------- 文案 ----------------
 def _count(result: dict) -> tuple[int, int]:
     return len(result.get("devices") or []), len(result.get("failed") or [])
@@ -368,9 +520,9 @@ def summary(result: dict) -> str:
     if ok and not bad:
         return f"识别到 {ok} 台设备，用时 {seconds:.1f} 秒"
     if ok and bad:
-        return f"识别到 {ok} 台设备，另有 {bad} 台读不到电量（下方写了原因）"
+        return f"识别到 {ok} 台设备，另有 {bad} 台读不到（原因见下表，可点「添加设备」指定型号）"
     if bad:
-        return f"当前 {bad} 台接收器都读不到电量，原因见下表"
+        return f"当前 {bad} 台接收器都读不到电量，点「添加设备」可手动指定型号"
     return "没有发现无线外设，确认接收器插好、设备已开机再试一次"
 
 

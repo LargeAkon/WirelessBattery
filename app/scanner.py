@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from config import Config
 from model import Device, UNKNOWN
-from providers import evision, hid_desc, hidlist, hidpp, hyperx, oem, raw_hid, win_battery, win_pnp, xinput_pad
+from providers import (evision, generic, hid_desc, hidlist, hidpp, hyperx, oem,
+                       raw_hid, win_battery, win_pnp, xinput_pad)
 
 MAX_MISS = 3  # 连续失败几次后不再显示，避免闪断
 
@@ -16,7 +17,7 @@ MAX_MISS = 3  # 连续失败几次后不再显示，避免闪断
 _VENDOR_SOURCES = (
     "HID++", "Evision", "Compx", "Razer", "华硕", "雷柏",
     "VAXEE", "迈从", "厂商", "索尼", "8BitDo", "怒喵", "HID 电量", "手柄电量",
-    "HyperX", "Nordic54", "赛睿", "JBL", "飞智",
+    "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "协议库",
 )
 
 
@@ -40,6 +41,7 @@ class Scanner:
             ("HID++", lambda d: hidpp.scan_logitech(d, force=force)),
             ("HyperX", lambda d: hyperx.scan_hyperx(d, force=force)),
             ("芯片组", lambda d: oem.scan_oem(d, force=force)),
+            ("协议库", lambda d: generic.scan_profiles(d, force=force)),
             ("HID描述符", lambda d: hid_desc.scan_hid_battery(d)),
             ("手柄", lambda d: xinput_pad.scan_xinput(d)),
             ("系统电池", lambda d: win_battery.scan_win_battery(d)),
@@ -161,6 +163,23 @@ class Scanner:
                         f"[合并] {d.name} 已被厂商通道读到（{d.vid_pid}），系统通道重复项丢弃")
                 continue
             result.append(d)
+
+        # 3. 协议库是兜底通道：同一只接收器（VID:PID + 实例）已经被专用通道
+        #    读到，就不再重复列一条。专用通道能拿到充电位、型号名与慢协议窗口，
+        #    协议库的覆盖面则是它的补充 —— 两者都命中时留前者。
+        native = {(d.vid_pid, (d.raw or {}).get("phys")) for d in result
+                  if _is_vendor(d) and not (d.source or "").startswith("协议库")
+                  and (d.raw or {}).get("phys")}
+        if native:
+            trimmed: list[Device] = []
+            for d in result:
+                if ((d.source or "").startswith("协议库")
+                        and (d.vid_pid, (d.raw or {}).get("phys")) in native):
+                    if debug:
+                        debug.append(f"[合并] {d.name} 已被专用通道读同一条接收器，协议库副本丢弃")
+                    continue
+                trimmed.append(d)
+            result = trimmed
         return result
 
     # ---------- 合并去重 ----------
@@ -220,7 +239,7 @@ def _keep_seconds(device: Device) -> float:
         # 保留 10 分钟：既覆盖典型休眠，又不至于拔掉后长时间挂着幽灵设备。
         return 600.0
     if src.startswith(("Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
-                        "迈从", "HyperX", "Nordic54", "赛睿", "JBL", "飞智")):
+                        "迈从", "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "协议库")):
         return 300.0
     return 180.0
 
@@ -235,7 +254,7 @@ def _score(device: Device) -> int:
         score += 2
     if device.source.startswith(
             ("HID++", "Evision", "Compx", "Razer", "华硕", "雷柏", "VAXEE", "厂商",
-             "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "迈从")):
+             "HyperX", "Nordic54", "赛睿", "JBL", "飞智", "迈从", "协议库")):
         score += 1
     # 同一只鼠标可能同时被"有线直连"和"接收器"看到（插着线充电、无线也还注册着）。
     # 有线这一路是实时直连，接收器那路可能滞后，合并时优先保留有线读数。

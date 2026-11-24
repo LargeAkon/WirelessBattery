@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -129,9 +130,30 @@ def _steel(pid: int):
 
 # (名称, VID, PID, 页面, 用法, 期望电量, 期望类型, 应答)
 # 应答: ("passive", frame) 打开就上报；("out", fn)；("feature", fn)；("none", None) 不该读到
+def _evision_slow(level: int, delay: float = 3.0):
+    """WOB 网页驱动那套：arg=6、校验和取和，回包还要等几秒（Rainy75 / Wave75）。"""
+
+    def handle(request: bytes):
+        if len(request) < 5 or request[0] != 0x04:
+            return None
+        if request[3] != 0x1A or request[4] != 0x06:
+            return None
+        total = (0x1A + 0x06) & 0xFFFF
+        if request[1] != (total & 0xFF) or request[2] != (total >> 8):
+            return None
+        buf = bytearray(64)
+        buf[0] = 0x04
+        buf[3] = 0x1A
+        buf[7] = 0x00
+        buf[8] = level & 0xFF
+        buf[9] = 0
+        return ("delayed", delay, bytes(buf))
+
+    return handle
+
+
 def _out(fn):
     return ("out", fn)
-
 
 def _feat(fn):
     return ("feature", fn)
@@ -164,6 +186,7 @@ DEVICES = [
     ("Hitscan Hyperlight", 0x3770, 0x0200, 0xFF02, 0x0002, 75, "mouse", _out(lambda _r: _compx(75))),
     ("ATK Zero", 0x373B, 0x1155, 0xFF05, 0x0001, 88, "mouse", _out(lambda _r: _nordic54())),
     ("ATK V75X 键盘", 0x320F, 0x5088, 0xFF1C, 0x0092, 93, "keyboard", _out(lambda _r: _evision(93))),
+    ("Rainy75 慢协议", 0x320F, 0x5091, 0xFF1C, 0x0092, 68, "keyboard", _out(_evision_slow(68))),
     ("万灵 Beast X", 0x36A7, 0xA880, 0xFFFF, 0x0000, 61, "mouse", _feat(lambda _r: _feature83(61))),
     ("兰族 Maya X", 0x373E, 0x001E, 0xFFFF, 0x0000, 31, "mouse", _feat(lambda _r: _feature83(31))),
     ("G-Wolves HTS", 0x33E4, 0x5803, 0xFFFF, 0x0000, 44, "mouse", _feat(lambda _r: _feature83(44))),
@@ -202,6 +225,7 @@ class _Handle:
     def __init__(self, spec):
         self.spec = spec
         self.queue: list[bytes] = []
+        self.pending: list[tuple[float, bytes]] = []
         self.feature = b""
         kind, payload = spec
         if kind == "passive" and payload:
@@ -211,11 +235,19 @@ class _Handle:
         kind, fn = self.spec
         if kind == "out" and fn:
             reply = fn(data)
-            if reply:
+            if isinstance(reply, tuple) and reply and reply[0] == "delayed":
+                # ("delayed", 秒, 帧)：WOB 那类接收器按 5 秒一班回包
+                self.pending.append((time.monotonic() + reply[1], reply[2]))
+            elif reply:
                 self.queue.append(reply)
         return len(data)
 
     def read(self, size: int, timeout_ms: int = 0):
+        now = time.monotonic()
+        for item in list(self.pending):
+            if item[0] <= now:
+                self.pending.remove(item)
+                self.queue.append(item[1])
         if not self.queue:
             return []
         return list(self.queue.pop(0)[:size])

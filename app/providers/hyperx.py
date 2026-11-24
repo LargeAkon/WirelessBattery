@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 
 from model import Device, HEADSET
 from providers import proto
+from providers.hidctl import set_output_report
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
 
@@ -118,7 +119,7 @@ def _read_parsed(dev, seconds: float, parse):
     return None
 
 
-def _query(dev, payload: bytes, parse, seconds: float = 0.45):
+def _query(dev, payload: bytes, parse, seconds: float = 0.45, control_path=None):
     _drain(dev)
     sent = False
     try:
@@ -129,10 +130,18 @@ def _query(dev, payload: bytes, parse, seconds: float = 0.45):
             dev.send_feature_report(payload)
             sent = True
         except Exception:
-            return None
-    if not sent:
-        return None
-    return _read_parsed(dev, seconds, parse)
+            sent = False
+    if sent:
+        hit = _read_parsed(dev, seconds, parse)
+        if hit is not None:
+            return hit
+    if control_path is not None:
+        # HP / HyperX 这代接收器没有可用的中断 OUT 端点，命令只认 SET_REPORT
+        # 控制传输（Linux 那边的 hid-hyperx-headset 也是这么发的）。
+        # hidapi 的 write() 走中断管道，写进去没有任何反应，这里补一发。
+        if set_output_report(control_path, payload[:62]):
+            return _read_parsed(dev, seconds, parse)
+    return None
 
 
 def _requests(family: str) -> tuple[list[bytes], list[bytes], object, object]:
@@ -168,25 +177,24 @@ def _requests(family: str) -> tuple[list[bytes], list[bytes], object, object]:
     return [battery], [charge], proto.parse_hyperx_kingston_battery, proto.parse_hyperx_kingston_charging
 
 
-def _ask(dev, payloads: list[bytes], parse):
+def _ask(dev, payloads: list[bytes], parse, control_path=None):
     for payload in payloads:
-        hit = _query(dev, payload, parse)
+        hit = _query(dev, payload, parse, control_path=control_path)
         if hit is not None:
             return hit
     return None
 
 
-def _read_one(dev, family: str) -> tuple[float | None, bool] | None:
+def _read_one(dev, family: str, control_path=None) -> tuple[float | None, bool] | None:
     battery_frames, charge_frames, parse_level, parse_charge = _requests(family)
     if family in ("alpha2", "flight"):
-        hit = _ask(dev, battery_frames, parse_level)
-        return hit
-    level = _ask(dev, battery_frames, parse_level)
+        return _ask(dev, battery_frames, parse_level, control_path)
+    level = _ask(dev, battery_frames, parse_level, control_path)
     if level is None:
         return None
     charging = False
     if parse_charge is not None and charge_frames:
-        flag = _ask(dev, charge_frames, parse_charge)
+        flag = _ask(dev, charge_frames, parse_charge, control_path)
         if flag is not None:
             charging = bool(flag)
     return float(level), charging
@@ -232,7 +240,7 @@ def scan_hyperx(debug: list | None = None, force: bool = False) -> list[Device]:
             dev = None
             try:
                 dev = _open(info["path"])
-                found = _read_one(dev, family or "")
+                found = _read_one(dev, family or "", info["path"])
             except Exception:
                 found = None
             finally:

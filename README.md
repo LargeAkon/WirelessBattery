@@ -70,7 +70,7 @@
 | 方案商 / 通道 | 覆盖 |
 |---|---|
 | **HID++ 2.0** | 罗技全系：G Pro、GPW、MX Master、G913 等 |
-| **Evision** | ATK、VGN、VXE 的键盘与部分鼠标（`VID 320F`，`FF1C:0092`） |
+| **Evision** | ATK、VGN、VXE、WOBKEY 的键鼠（`VID 320F`，`FF1C:0092`）；WOB 系（Rainy75 / Wave75）回包慢，最长等 14 秒 |
 | **Compx 17 字节帧** | 页面 `FF02` 的接收器，不看品牌：ATK、VXE、VGN 鼠标、达尔优、Pulsar、Attack Shark、狼蛛键盘、Ninjutso、因科特、Hitscan、塞洛斯、Finalmouse、赴极等贴牌 |
 | **Nordic 54** | ATK Zero 一类（`VID 373B`，页面 `FF05`） |
 | **0x83 特征报告** | 万灵花兽、兰族、G-Wolves、迈从；中颖公版上的狼蛛、前行者、部分黑爵与多彩 |
@@ -81,11 +81,11 @@
 | **怒喵 / 黑爵 / Akko** | 同一套状态报告 `0x05`（`VID 3151`） |
 | **赛睿** | Arctis Nova 7 Gen2 的 `b0`、Aerox 的 `d2`、Rival 3 的 `aa` |
 | **飞智** | Vader 5 Pro 的 GET_INFO（`VID 37D7`）；旧款多数只有 XInput 四档 |
-| **HyperX** | HyperX 2.4G 耳机（按产品号匹配） |
+| **HyperX** | HyperX 2.4G 耳机（按产品号匹配）；含 Cloud III Wireless `03F0:05B7`，命令走控制管道 |
 | **雷柏 / JBL** | 接收器主动上报，被动监听 |
 | **八位堂 / 索尼** | DualSense、DualShock 与八位堂手柄的输入报告 |
 | **HID 标准电池集合** | 描述符里带 Battery Strength 的设备：西伯利亚、iKF、阿斯盾、漫步者 HECATE 等 |
-| **XInput** | Xbox 手柄，以及走 XInput 的飞智、LEADJOY（四档电量） |
+| **XInput** | Xbox 手柄，以及走 XInput 的飞智、LEADJOY（四档电量，插线供电时不报） |
 | **Windows 电池类 / 设备属性** | 系统为其注册了电池设备或能报告 BatteryLevel 的外设 |
 | **自定义规则** | 你在诊断窗口里现场识别出的私有格式，自动存成规则 |
 
@@ -101,6 +101,7 @@
 | 蓝牙设备 | 只处理 2.4G 与 USB 有线 |
 | 无电量接口的公版接收器（如 `258A:1007`） | 固件里没有电量字段 |
 | 任天堂手柄 | USB / 蓝牙，不走 2.4G 接收器 |
+| Xbox 手柄的精确百分比 | XInput 只给四档（5 / 25 / 60 / 100） |
 | Lofree、IPI、EPOS 等 | 私有帧还没有样本，见[适配流程](#适配新设备) |
 | 其余未覆盖品牌 | 按方案商适配，覆盖面随 Issues 里的报告增长 |
 

@@ -83,6 +83,12 @@ def scan_xinput(debug: list | None = None) -> list[Device]:
             if fn(slot, devtype, ctypes.byref(info)) != 0:
                 continue
             if info.BatteryType in _SKIP_TYPES:
+                # 跳过也要留痕：插着线（0x01）或压根没配对（0x00）在界面上都是"没有手柄"，
+                # 报告里不写清楚，就只能靠猜。
+                if debug is not None and devtype == 0x00:
+                    debug.append(
+                        f"[手柄] 槽位{slot + 1} 跳过：电池类型 {info.BatteryType:#04x}"
+                        f"（{_TYPE_TEXT.get(info.BatteryType, '未知')}）")
                 continue
             level = _LEVELS.get(info.BatteryLevel)
             if level is None:

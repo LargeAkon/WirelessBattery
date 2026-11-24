@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover
 from model import Device, KEYBOARD, MOUSE, HEADSET
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
+from providers.inputidle import wait_idle
 
 EVISION_VID = 0x320F
 # 0x320F 是 Evision（ATK / VGN / VXE 共用）的厂商 ID。旗下型号极多：
@@ -31,6 +32,20 @@ EVISION_VID = 0x320F
 REPORT_ID = 0x04
 CMD_BATTERY = 0x1A
 REPORT_LEN = 64          # 含报号
+
+# 同一条命令有两套写法，实测两种都存在：
+#   1) VGN / ATK HUB：arg=0，校验和 = ~sum(bytes[3:])
+#   2) WOB 网页驱动（Rainy75 / Wave75）：arg=6，校验和 = sum(bytes[3:])
+# 两种都是只读查询，先问 1)，不通再按 WOB 的节奏慢慢等。
+FRAME_VARIANTS = ((0x00, True), (0x06, False))   # (arg, 校验和取反)
+
+# WOB 那套的应答不是立刻回来的：接收器大约 5 秒一班把命令转给键盘，
+# 首帧到第一个回包要 5~12 秒，按 1.2 秒的超时永远读不到。
+# 长窗口只在"这台设备确认过吃 WOB 这套"或"从没读到过、且距上次长尝试超过
+# SLOW_RETRY"时启用，避免每轮刷新都白等十几秒。
+SLOW_WINDOW = 14.0
+SLOW_RESEND = 1.5
+SLOW_RETRY = 1800.0
 # 同一设备的最小重复查询间隔（秒）。
 # 原来这里是 600s，正好等于最小刷新间隔（10 分钟）：定时器有几秒误差时，
 # now-cached 会落在 <600 里被判成"仍在冷却"，于是每两次刷新才真正读一次，
@@ -45,12 +60,18 @@ COOLDOWN = 20
 FAIL_COOLDOWN = 180
 
 _cache: dict[str, tuple[float, float | None, bool, str]] = {}
+# 确认走 WOB 那套慢协议的设备（key），之后每轮都用长窗口问
+_SLOW_DEVICES: set[str] = set()
+# 长窗口也失败过的设备：半小时内不再试长窗口
+_SLOW_FAIL: dict[str, float] = {}
 
 
-def _frame() -> list[int]:
-    body = bytes([CMD_BATTERY]) + b"\x00" * 61
-    checksum = (sum(body) & 0xFFFF) ^ 0xFFFF
-    return [REPORT_ID, checksum & 0xFF, (checksum >> 8) & 0xFF, CMD_BATTERY] + [0] * 59
+def _frame(arg: int, inverted: bool) -> list[int]:
+    body = bytes([CMD_BATTERY, arg]) + b"\x00" * 60
+    total = sum(body) & 0xFFFF
+    checksum = (total ^ 0xFFFF) if inverted else total
+    return ([REPORT_ID, checksum & 0xFF, (checksum >> 8) & 0xFF, CMD_BATTERY, arg]
+            + [0] * 59)
 
 
 def _clean_name(product: str, manufacturer: str) -> str:
@@ -124,8 +145,31 @@ def _endpoints() -> list[dict]:
     return out
 
 
-def _query(path: bytes, attempts: int = 3) -> tuple[float | None, bool, str]:
-    """返回 (电量, 是否充电, 状态说明)。"""
+def _parse(reply: bytes):
+    """回包 → (电量, 充电, 说明)。不是电量应答就返回 None。
+
+    状态字节必须是 0 才认，宁可这一轮读不到，也不拿别的字段当电量。
+    """
+    if len(reply) < 10 or reply[0] != REPORT_ID or reply[3] != CMD_BATTERY:
+        return None
+    code = reply[7]
+    level = reply[8]
+    charging = reply[9] in (1, 2)
+    if code == 0xFF:
+        return None, False, "休眠"
+    if code == 0 and 1 <= level <= 100:
+        return float(level), charging, "正常"
+    if code:
+        return None, False, f"状态码 0x{code:02X}"
+    return None
+
+
+def _query(path: bytes, slow: bool = False) -> tuple[float | None, bool, str]:
+    """返回 (电量, 是否充电, 状态说明)。
+
+    slow=False：按 VGN/ATK 那套问一次，等 1.2 秒；
+    slow=True ：两套写法轮流补发，最长等 SLOW_WINDOW 秒（WOB 键盘 5~12 秒才回）。
+    """
     dev = hid.device()
     try:
         dev.open_path(path)
@@ -134,39 +178,42 @@ def _query(path: bytes, attempts: int = 3) -> tuple[float | None, bool, str]:
     try:
         dev.set_nonblocking(True)
         status = "未应答"
-        for attempt in range(attempts):
-            # 先丢掉上一次查询残留的应答帧。设备可能把上一拍的应答留在缓冲里，
-            # 不清理就会读到"上一拍的电量"，看起来像读数总是慢一拍。
-            for _ in range(16):
-                if not dev.read(REPORT_LEN):
-                    break
-            try:
-                dev.write(_frame())
-            except Exception as exc:
-                return None, False, f"发送失败: {exc}"
-            deadline = time.monotonic() + 1.2
-            while time.monotonic() < deadline:
+        deadline = time.monotonic() + (SLOW_WINDOW if slow else 1.2)
+        next_send = 0.0
+        variant = 0
+        while time.monotonic() < deadline:
+            if time.monotonic() >= next_send:
+                # 先丢掉上一次查询残留的应答帧。设备可能把上一拍的应答留在缓冲里，
+                # 不清理就会读到"上一拍的电量"，看起来像读数总是慢一拍。
+                for _ in range(16):
+                    try:
+                        if not dev.read(REPORT_LEN):
+                            break
+                    except Exception:
+                        break
+                arg, inverted = FRAME_VARIANTS[variant % len(FRAME_VARIANTS)]
+                variant += 1
+                # 打字中途插厂商帧会挤丢 key-up，让系统先空闲 0.3 秒
+                wait_idle(0.3, 1.2)
                 try:
-                    data = dev.read(REPORT_LEN)
-                except Exception:
-                    data = None
-                if not data:
-                    time.sleep(0.01)
-                    continue
-                reply = bytes(data)
-                if len(reply) < 10 or reply[0] != REPORT_ID or reply[3] != CMD_BATTERY:
-                    continue
-                code = reply[7]
-                level = reply[8]
-                charging = reply[9] in (1, 2)
-                if code == 0 and 0 <= level <= 100:
-                    return float(level), charging, "正常"
-                if code == 0xFF:
-                    status = "休眠"
-                elif code != 0:
-                    status = f"状态码 0x{code:02X}"
-            if attempt < attempts - 1:
-                time.sleep(0.25)
+                    dev.write(_frame(arg, inverted))
+                except Exception as exc:
+                    return None, False, f"发送失败: {exc}"
+                next_send = time.monotonic() + (SLOW_RESEND if slow else 1.2)
+            try:
+                data = dev.read(REPORT_LEN)
+            except Exception:
+                data = None
+            if not data:
+                time.sleep(0.01)
+                continue
+            hit = _parse(bytes(data))
+            if hit is None:
+                continue
+            level, charging, note = hit
+            if level is not None:
+                return level, charging, "正常"
+            status = note
         return None, False, status
     finally:
         try:
@@ -202,7 +249,18 @@ def scan_evision(debug: list | None = None, force: bool = False) -> list[Device]
             if debug is not None:
                 debug.append(f"[Evision] {name} 使用 {int(now - cached[0])}s 前读数")
         else:
-            level, charging, status = _query(info["path"], attempts=info.get("_attempts") or 1)
+            # 确认过吃 WOB 慢协议的设备每轮都等；没确认过的只偶尔试一次长窗口，
+            # 否则一台不支持的 320F 设备会让每轮刷新都白等十几秒。
+            slow = key in _SLOW_DEVICES
+            if not slow and (cached is None or cached[1] is None):
+                slow = force or (now - _SLOW_FAIL.get(key, 0.0) > SLOW_RETRY)
+            level, charging, status = _query(info["path"], slow=slow)
+            if slow:
+                if level is not None:
+                    _SLOW_DEVICES.add(key)
+                    _SLOW_FAIL.pop(key, None)
+                else:
+                    _SLOW_FAIL[key] = now
             if level is not None:
                 _cache[key] = (now, level, charging, status)
             elif cached:
@@ -215,7 +273,7 @@ def scan_evision(debug: list | None = None, force: bool = False) -> list[Device]
         if debug is not None:
             debug.append(
                 f"[Evision] {vid:04X}:{pid:04X} {name!r} 电量={level} "
-                f"充电={charging} 状态={status}"
+                f"充电={charging} 状态={status}{'（慢协议）' if key in _SLOW_DEVICES else ''}"
             )
 
         # 查询超时说明这条口不说 Evision。休眠是设备应过答，仍然留下。

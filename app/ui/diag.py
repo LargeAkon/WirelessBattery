@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 import theme
 from config import APP_VERSION, Config
 from model import Device
-from providers import raw_hid
+from providers import raw_hid, xinput_pad
 from recognize import endpoint_text, recognize
 from vendors import describe as describe_vendor
 
@@ -386,6 +386,33 @@ class DiagWindow(QWidget):
         eps = raw_hid.describe_endpoints()
         self.endpoints = eps
 
+        # ★ 端点各听 1.5 秒：私有协议的报文字段光看端点表是推不出来的，
+        # 报告里带上原始帧，下一次就不用再让用户跑一遍。
+        samples: list[str] = []
+        targets = [ep for ep in eps if ep.get("recommend")][:4]
+        for ep in targets:
+            head = (f"{ep['vendor_id']:04X}:{ep['product_id']:04X} "
+                    f"页=0x{(ep['usage_page'] or 0):04X} 用法=0x{(ep['usage'] or 0):04X} "
+                    f"接口={ep['interface']}")
+            self.status.setText(f"正在采样 {head.split()[0]}…")
+            QGuiApplication.processEvents()
+            try:
+                res = raw_hid.sniff_candidates(ep["path"], 1.5, "")
+            except Exception as exc:
+                samples.append(f"{head} → 采样异常: {type(exc).__name__}: {exc}")
+                continue
+            if res.get("error"):
+                samples.append(f"{head} → {res['error']}")
+                continue
+            if not res.get("total"):
+                samples.append(f"{head} → 1.5 秒内无上报（设备可能休眠，或该端点只应答查询）")
+                continue
+            samples.append(f"{head} → {res['total']} 帧")
+            for rid, hex_text in res.get("reports", [])[:8]:
+                samples.append(f"    rid={rid}  {hex_text}")
+        if not targets:
+            samples.append("（没有可采样的厂商端点：这台机器上没枚举到 2.4G 接收器的私有通道）")
+
         lines: list[str] = [
             "外设电量 · 诊断报告",
             "=" * 46,
@@ -406,7 +433,10 @@ class DiagWindow(QWidget):
         else:
             lines.append("（无）")
 
-        lines += ["", f"【二、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
+        lines += ["", "【二、XInput 槽位】手柄走 XInput 时只有四档，这里看原始值"]
+        lines.extend(xinput_pad.describe())
+
+        lines += ["", f"【三、HID 端点】共 {len(eps)} 个（★ = 厂商协议通道，电量候选）"]
         for ep in eps:
             lines.append(
                 f"{ep['vendor_id']:04X}:{ep['product_id']:04X} | "
@@ -416,7 +446,10 @@ class DiagWindow(QWidget):
                 f"{'★ ' if ep.get('recommend') else ''}{ep.get('role') or '-'} | "
                 f"接口={ep['interface']}")
 
-        lines += ["", f"【三、扫描日志】共 {len(debug)} 行"]
+        lines += ["", "【四、厂商端点被动采样】每个 ★ 端点听 1.5 秒，原样记录上报帧"]
+        lines.extend(samples)
+
+        lines += ["", f"【五、扫描日志】共 {len(debug)} 行"]
         lines.extend(debug or ["（无）"])
         lines += ["", "=" * 46, "请把本文件整份发回，内容越多越好，不要删减。"]
 

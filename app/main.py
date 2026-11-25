@@ -105,8 +105,10 @@ class TrayApp:
         self.timer.timeout.connect(lambda: self.refresh())
         self.timer.start()
 
-        # 首次读取走静默强扫：没点过按钮，就不该出现"完成对勾"
-        QTimer.singleShot(250, lambda: self.refresh(force=True))
+        # 首次读取走静默扫描：没点过按钮，就不该出现"完成对勾"。
+        # 不传 force：进程刚起，各通道的缓存都是空的，本来就会真去读；
+        # 而 force 会让 Evision 直接走慢协议窗口，普通键盘白等十几秒。
+        QTimer.singleShot(250, lambda: self.refresh())
 
     # ---------------- 菜单 ----------------
     def _menu_qss(self) -> str:

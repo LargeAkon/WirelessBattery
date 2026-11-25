@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -24,6 +25,7 @@ except Exception:      # pragma: no cover
 
 from model import GAMEPAD, HEADSET, KEYBOARD, MOUSE, UNKNOWN, Device
 from providers.hidpath import phys_token
+from providers.inputidle import wait_idle
 
 # 同一只设备探测失败后，多久之内不再碰它。手动刷新（force）会绕过。
 COOLDOWN = 150.0
@@ -31,12 +33,26 @@ _FAIL: dict[tuple, float] = {}
 
 DEFAULT_READ = 64
 
+# 发帧前让位等多久。协议包整轮预算只有 9 秒，这里不能等太久：
+# 用户一直在打字时应当尽快放弃，而不是把预算耗在等待上。
+WRITE_IDLE_LIMIT = 0.8
+
+# 这一轮是不是"因为用户在输入而没发帧"。让位不算失败，
+# 不能进冷却 —— 否则用户打一会儿字，设备就被关 150 秒。
+_local = threading.local()
+
+
+def deferred() -> bool:
+    return bool(getattr(_local, "deferred", False))
+
 
 def cooled(key: tuple, force: bool) -> bool:
     return (not force) and time.monotonic() < _FAIL.get(key, 0.0)
 
 
 def mark_fail(key: tuple, seconds: float = COOLDOWN) -> None:
+    if deferred():
+        return                         # 让位不是设备的错
     _FAIL[key] = time.monotonic() + seconds
 
 
@@ -171,6 +187,17 @@ def drain(dev, limit: int = 8, ms: int = 1) -> None:
 
 
 def write(dev, frame: bytes) -> bool:
+    """发一帧。发之前先让位：用户正在连续输入时不发，返回 False。
+
+    2.4G 键盘的厂商命令和按键报文共用一条空中链路与中断通道，打字中途
+    插一帧会把 key-up 挤到命令往返之后，用户就会觉得"按下去没反应"。
+    这里宁可这一轮不读，也不打断输入；调用方的 mark_fail 会自动跳过，
+    不把让位算成失败。
+    """
+    _local.deferred = False
+    if not wait_idle(limit=WRITE_IDLE_LIMIT):
+        _local.deferred = True
+        return False
     try:
         dev.write(bytes(frame))
         return True

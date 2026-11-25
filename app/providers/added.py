@@ -18,7 +18,12 @@ from model import GAMEPAD, HEADSET, KEYBOARD, MOUSE, UNKNOWN, Device
 from providers import packs, registry
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth
+from providers.inputidle import wait_idle
 from providers.oem import _instance, _kind as _oem_kind, _product_name
+
+# 外置协议会往设备写帧，键盘上同样会挤掉打字时的 key-up。
+# 用户手不停时跳过，不写冷却缓存（让位不是设备故障）。
+IDLE_LIMIT = 0.8
 
 # 读不到时的冷却：这台设备根本不吃这条协议，每轮都去等超时只会把刷新拖慢。
 # 手动刷新（force=True）绕过。
@@ -113,6 +118,11 @@ def scan_added(debug: list | None = None, force: bool = False) -> list[Device]:
                 continue
             paths = profiles.order_paths(profile, members)
             if not paths:
+                continue
+            # 打字期间不发帧：保住 key-up，下轮刷新再读
+            if not wait_idle(limit=IDLE_LIMIT):
+                if debug is not None:
+                    debug.append(f"[已添加] {vid_hex}:{pid_hex} 用户正在输入，本轮跳过")
                 continue
             try:
                 hit = profiles.read(profile, paths)

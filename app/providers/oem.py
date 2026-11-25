@@ -20,10 +20,14 @@ from model import GAMEPAD, Device, HEADSET, KEYBOARD, MOUSE, UNKNOWN
 from providers import packs, proto
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth, phys_token
+from providers.inputidle import wait_idle
 
 # 查询没有得到合法应答时，短时间内不再打开它。手动刷新会绕过。
 _FAIL: dict[tuple, float] = {}
 _FAIL_FOR = 90.0
+# 键盘的厂商帧与按键报文共用一条空中链路，打字中途插帧会挤掉 key-up。
+# 用户手不停时整组跳过，最多等这么久（0.6 秒空隙即可）。
+KEY_IDLE_LIMIT = 0.8
 
 _SONY_PIDS = {0x05C4, 0x09CC, 0x0BA0}   # DualShock 4；DualSense 只有蓝牙/有线，不做
 
@@ -593,6 +597,13 @@ def scan_oem(debug: list | None = None, force: bool = False) -> list[Device]:
             pass
         name = _product_name(members, vid, pid)
         kind = _kind(members, name)
+        # 键盘的厂商帧会占用键击上报共用的一条空中链路，打字中途插帧会让
+        # key-up 排到命令往返之后。用户手不停时整组跳过：不写负缓存，
+        # 下一轮刷新照常读。鼠标/耳机不受影响，它们的帧不走键盘信道。
+        if kind == KEYBOARD and not wait_idle(limit=KEY_IDLE_LIMIT):
+            if debug is not None:
+                debug.append(f"[芯片组] {vid:04X}:{pid:04X} 键盘正在输入，本轮跳过")
+            continue
         for source, fn in probes:
             try:
                 hit = fn(members, vid, pid)

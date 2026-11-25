@@ -28,6 +28,7 @@ import time
 from model import Device
 from providers import hidlist
 from providers.hidpath import is_bluetooth, phys_token
+from providers.inputidle import wait_idle
 from providers.packs import base, gamepad, headset, keyboard, mouse
 
 # 四个类型的顺序与各自组内顺序，合起来就是全局优先级。
@@ -38,6 +39,8 @@ PACKS = mouse.MODULES + keyboard.MODULES + headset.MODULES + gamepad.MODULES
 # 整个通道的预算。超了就不再开新设备：宁可这一轮少认一台，
 # 也不要把一次刷新拖成十几秒。
 BUDGET_S = 9.0
+# 整轮扫描前的让位等待上限：用户停手 0.6 秒就继续，最多等这么久。
+SCAN_IDLE_LIMIT = 0.8
 
 
 def _instance(path) -> str:
@@ -65,6 +68,15 @@ def scan(debug: list | None = None, force: bool = False) -> list[Device]:
     if base.hid is None:
         return []
     infos = hidlist.devices()
+
+    # 厂商帧与按键报文共用一条空中链路：打字中途插帧会把 key-up 挤到命令
+    # 往返之后，用户看到的就是"按下去半天没反应"。用户正在连续输入时整轮
+    # 跳过，比让每个模块各等一次更划算，也避免把 9 秒预算耗在等待上。
+    # 让位不写失败缓存，下一轮刷新照常读。
+    if not wait_idle(limit=SCAN_IDLE_LIMIT):
+        if debug is not None:
+            debug.append("[协议包] 用户正在输入，本轮跳过")
+        return []
 
     per_instance: dict[tuple, list[dict]] = {}
     per_vid_pid: dict[tuple, list[dict]] = {}

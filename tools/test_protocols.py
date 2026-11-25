@@ -210,6 +210,63 @@ def test_merge() -> None:
     _check("two receivers stay", len(merged) == 2)
 
 
+def test_input_guard() -> None:
+    """打字让位：厂商帧不能插进用户输入中间。
+
+    320F:5088 这类接收器把键盘与厂商 collection 挂在同一个 USB 接口上，
+    发一帧就要占用键击上报的通道。早期的 14 秒慢窗口发 9 帧，导致开机
+    扫描那十几秒打字发涩。这里锁住三条不能再退回去的约束：
+    一轮最多两帧、确认过写法后不再发无效帧、用户忙时一帧都不发。
+    """
+    from providers import evision, inputidle
+    from providers.packs import base
+
+    _check("未确认写法最多两帧",
+           len(evision._order("guard", slow=False)) <= evision.MAX_FRAMES)
+    _check("未确认慢路径最多两帧",
+           len(evision._order("guard", slow=True)) <= evision.MAX_FRAMES)
+
+    evision._VARIANT["guard"] = 1
+    _check("确认后只发那一套", evision._order("guard", slow=False) == [1])
+    _check("慢协议补发同款", evision._order("guard", slow=True) == [1, 1])
+    evision._VARIANT.pop("guard", None)
+
+    original = inputidle.idle_seconds
+    try:
+        # 用户一直在敲键盘：必须返回 False 让调用方放弃，而不是等一会儿硬发
+        inputidle.idle_seconds = lambda: 0.05
+        _check("持续输入时让位", inputidle.wait_idle(need=0.6, limit=0.2) is False)
+
+        class FakeDev:
+            def __init__(self) -> None:
+                self.writes = 0
+
+            def write(self, _frame) -> None:
+                self.writes += 1
+
+        dev = FakeDev()
+        _check("让位时不发帧", base.write(dev, b"\x00" * 8) is False)
+        _check("让位时没真写", dev.writes == 0)
+        _check("让位有标记", base.deferred() is True)
+
+        # 让位不是设备故障：不能进冷却，否则用户打一会儿字就被关 150 秒
+        key = ("guard-test",)
+        base._FAIL.pop(key, None)
+        base.mark_fail(key)
+        _check("让位不进冷却", key not in base._FAIL)
+
+        # 用户停手后必须正常放行
+        inputidle.idle_seconds = lambda: 5.0
+        _check("空闲时放行", inputidle.wait_idle(need=0.6, limit=0.2) is True)
+        dev2 = FakeDev()
+        _check("放行后正常发帧", base.write(dev2, b"\x00" * 8) is True)
+        _check("确实写了一帧", dev2.writes == 1)
+        _check("放行后标记复位", base.deferred() is False)
+    finally:
+        inputidle.idle_seconds = original
+        base._FAIL.pop(("guard-test",), None)
+
+
 def test_packs_layout() -> None:
     """协议包目录：类型 → 品牌 → 型号。每个模块都要写清适配什么设备。
 
@@ -253,5 +310,6 @@ if __name__ == "__main__":
     test_descriptor()
     test_endpoints()
     test_merge()
+    test_input_guard()
     test_packs_layout()
     print("ALL OK")

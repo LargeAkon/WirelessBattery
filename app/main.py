@@ -24,6 +24,7 @@ from config import (                                                          # 
 from model import Device                                                      # noqa: E402
 from scanner import Scanner                                                   # noqa: E402
 from trayhover import TrayHover                                               # noqa: E402
+from trayplace import promote_own_tray_icon, rect_is_overflow_chevron         # noqa: E402
 from ui import icons                                                          # noqa: E402
 from ui.card import CardWindow, tray_rect_ok                                  # noqa: E402
 from ui.diag import DiagWindow                                                # noqa: E402
@@ -87,6 +88,11 @@ class TrayApp:
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+        # Windows 11 默认把新图标收进「^」。改注册表后要重新挂一次图标，
+        # 资源管理器才会把它摆回任务栏。只对安装后的 WirelessBattery.exe 生效。
+        if promote_own_tray_icon():
+            self.tray.hide()
+            self.tray.show()
 
         self.card = CardWindow(self.config)
         self.card.refresh_requested.connect(lambda: self.refresh(manual=True))
@@ -164,10 +170,10 @@ class TrayApp:
 
     def show_card(self) -> None:
         rect = self.tray.geometry()
-        if not tray_rect_ok(rect):
-            # 图标被折进「^」/ 任务栏自动隐藏 / 全屏游戏切回来时拿不到
-            # 可信矩形：退到光标所在屏幕的右下角。原来是 primaryScreen，
-            # 多显示器下会弹到另一块屏；拿整条任务栏当锚点则会跑到屏幕中间。
+        if not tray_rect_ok(rect) or rect_is_overflow_chevron(rect):
+            # 图标被收进「^」、任务栏自动隐藏，或矩形其实是「^」按钮时，
+            # 不能拿它当锚点。退到光标所在屏幕的右下角。多显示器下用
+            # primaryScreen 会弹到另一块屏；拿整条任务栏当锚点则会跑到屏幕中间。
             screen = self.app.screenAt(QCursor.pos()) or self.app.primaryScreen()
             geo = screen.availableGeometry()
             rect = QRect(geo.right() - 56, geo.bottom() - 40, 24, 24)

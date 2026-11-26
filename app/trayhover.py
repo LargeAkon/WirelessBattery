@@ -7,8 +7,9 @@ QSystemTrayIcon.geometry()（Qt 6 在 Windows 上走 Shell_NotifyIconGetRect）�
 坐标是逻辑像素，和 QCursor.pos() 同一套，不用自己乘 DPI。
 
 三个必须处理的边角情况：
-1. 图标被折叠进「^」里时拿不到矩形 —— 整段逻辑静默关闭，仍然显示原生
-   文字提示，点一下也照样能开卡片；
+1. 图标被收进「^」时，系统仍会给出一枚图标大小的矩形，而且这个矩形就是
+   「显示隐藏的图标」按钮。拿它当热区，鼠标停在 ^ 上就会弹出卡片。
+   矩形中心对上这个按钮时，悬停关掉，点图标仍然可以开卡片；
 2. 用户点图标把卡片收起来之后，光标还压在图标上，不该立刻又被悬停打开，
    所以光标离开图标之前一直保持静默（mute）；
 3. 鼠标从图标移向卡片时要经过一段"谁都不属于"的边界 —— 收起动作延迟
@@ -22,6 +23,7 @@ from PySide6.QtCore import QObject, QRect, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
+from trayplace import rect_is_overflow_chevron
 from ui.card import tray_rect_ok
 
 POLL_MS = 120          # 8 次/秒：够快，又不至于让 CPU 常驻
@@ -79,7 +81,9 @@ class TrayHover(QObject):
         # 只认"一枚图标"大小的矩形。有的系统在全屏应用前台 / 切分辨率之后
         # 会把整条任务栏或通知区域丢回来，宽高几百像素；拿它当悬停热区，
         # 鼠标扫过任务栏就会弹卡片，落位也会跑到屏幕中间。
-        ok = tray_rect_ok(rect)
+        # 收进「^」时矩形大小仍然像一枚图标，但中心控件是「显示隐藏的图标」。
+        # 那种矩形不能当悬停热区，否则鼠标停在箭头上就会把卡片弹出来。
+        ok = tray_rect_ok(rect) and not rect_is_overflow_chevron(rect)
         self._rect = QRect(rect) if ok else QRect()
         if ok != self._supported:
             self._supported = ok
@@ -90,6 +94,10 @@ class TrayHover(QObject):
         if self._ticks % 5 == 1 or self._rect.isNull():
             self._refresh_rect()
         if not self._supported or not self.tray.isVisible():
+            # 图标刚被收进「^」时，悬停弹出的卡片还挂在箭头上，收掉。
+            # 点开的卡片不在这里关，仍走原来的失焦逻辑。
+            if self.card.isVisible() and self.card._hover_shown:
+                self.card.hide_card()
             return
 
         pos = QCursor.pos()

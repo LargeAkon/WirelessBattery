@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 
 import profiles
-from model import GAMEPAD, HEADSET, KEYBOARD, MOUSE, UNKNOWN, Device
+from model import GAMEPAD, HEADSET, KEYBOARD, MOUSE, Device
 from providers import packs, registry
 from providers.hidlist import devices as hid_devices
 from providers.hidpath import is_bluetooth

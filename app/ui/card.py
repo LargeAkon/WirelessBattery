@@ -6,11 +6,13 @@
 """
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import (
     QAbstractAnimation, QEasingCurve, QEvent, QParallelAnimationGroup, QPoint,
     QPropertyAnimation, QRect, Qt, QTimer, Signal,
 )
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
@@ -26,12 +28,10 @@ from ui.widgets import DeviceRow, IconButton, ToggleSwitch
 
 CARD_WIDTH = 344
 CARD_PAD = 18
-# 不再给投影留边：卡片四周那一圈黑影既不好看也不必要 —— 46px 的模糊
-# 塞在 22px 的窗口留白里，投影在半路被窗口边界裁断，四个角就成了硬邦邦
-# 的黑三角。现在窗口边界 == 卡片边界，轮廓交给卡片自己的 1px 描边。
-# 顺带的好处：grab 一张没有效果滤镜的窗口只要 1ms 左右（以前要跑 46px
-# 高斯），换肤动效起手更快。
-SHADOW_PAD = 0
+# 窗口边界 == 卡片边界：卡片四周不留投影，轮廓交给卡片自己的 1px 描边。
+# 早先给投影留过 22px 边距，46px 的模糊在半路被窗口裁断，四个角成了硬邦邦
+# 的黑三角；去掉之后 grab 一张窗口也只要 1ms 左右（以前要跑一遍高斯），
+# 换肤动效起手更快。
 SHADOW_GAP = 20     # 卡片底边离托盘图标的距离
 # 毛玻璃底图的余量。卡片底边钉在托盘上方，切到设置页时整张卡片向上长
 # 170 多像素、顶边跑到旧底图之外；底图盖不满卡片时 ScreenBlur.paint 会
@@ -43,6 +43,44 @@ BACKDROP_SIDE = 90
 # 深色材质本身就压得住，用 glass.py 里的默认值即可。
 LIGHT_DOWNSCALE = 4
 LIGHT_BLUR = 20.0
+
+# 托盘图标一定贴着任务栏所在的屏幕边缘。切屏 / 退出全屏游戏之后，
+# Shell_NotifyIconGetRect 偶尔会返回屏幕中间的一块矩形（浮出工具栏、
+# 输入法候选条之类），照着它落位，卡片就会"自己跑到屏幕中间"。
+# 离任何一条屏幕边超过这个距离的锚点一律不认。
+TRAY_EDGE = 260
+# 图标矩形不可能这么大。有的系统版本在全屏应用前台时会把整条任务栏
+# 或整个通知区域丢回来，宽高几百像素 —— 那种矩形也不能当锚点，
+# 否则卡片会按"任务栏中心"落位，看起来就是跑到了屏幕中间。
+TRAY_MAX = 96
+# 位置巡检周期。只在卡片可见时跑，一次比较两个整数，成本可以忽略。
+ANCHOR_WATCH_MS = 700
+# 外部把窗口搬走多少像素才纠回。入场动画本身只移动 10px，
+# 阈值取 24 既不会跟动画打架，又能抓住 DPI 变化那种上百像素的跳动。
+ANCHOR_DRIFT = 24
+# 换肤盖板（卡片上的子控件）的看门狗。正常动效 780ms 结束；超过这个
+# 时间还挂着，说明换肤链路中途断了（异常 / 窗口被隐藏），必须强制收掉 ——
+# 否则旧皮肤会一直冻在卡片上，看着像"换了没生效"。
+REVEAL_WATCHDOG_MS = 1500
+# 点完换肤/毛玻璃之后的"免收起"宽限期。动效 780ms，留一点余量；
+# 悬停弹出的卡片没有前台身份，任何一次失活误判都会把正在播的卡片抽走。
+INTERACT_GRACE = 1.2
+
+
+def tray_rect_ok(rect: QRect | None) -> bool:
+    """这个矩形像不像一枚托盘图标。"""
+    if rect is None or rect.isNull():
+        return False
+    if rect.width() <= 0 or rect.height() <= 0:
+        return False
+    return rect.width() <= TRAY_MAX and rect.height() <= TRAY_MAX
+
+
+def _windows_api():
+    """user32 / kernel32。延迟导入，模块加载时不碰 Win32。"""
+    import ctypes
+
+    return ctypes.windll.user32, ctypes.windll.kernel32
 
 
 class CardWindow(QWidget):
@@ -74,6 +112,20 @@ class CardWindow(QWidget):
         # （盖板出现/消失、换肤时整窗重刷都可能触发一次），这里用序号把
         # 多次失活折叠成一次延后确认，确认不下来就当没发生。
         self._deactivate_gen = 0
+        # 托盘锚点。原先只存了 anchor_x / anchor_bottom 两个数字，一旦
+        # Windows 在切分辨率、独占全屏退出、DPI 变化之后把顶层窗口重新
+        # 摆到屏幕中间，就再也没人把它拉回来。现在记住整块托盘矩形，
+        # 并定期核对窗口位置。
+        self._anchor = QRect()
+        self._placing = False
+        self._anchor_watch = QTimer(self)
+        self._anchor_watch.setInterval(ANCHOR_WATCH_MS)
+        self._anchor_watch.timeout.connect(self._keep_anchor)
+        self._reveal_gen = 0
+        self._screens_hooked = False
+        # 最后一次"人在卡片里动手"的时刻（换肤/毛玻璃动效的起手）。
+        # 见 _confirm_deactivate：这之后的一小段时间里不许自动收起。
+        self._interact_stamp = 0.0
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
@@ -84,7 +136,7 @@ class CardWindow(QWidget):
         self.setStyleSheet(theme.qss())
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(SHADOW_PAD, SHADOW_PAD, SHADOW_PAD, SHADOW_PAD)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         self.card = GlassCard()
@@ -106,6 +158,107 @@ class CardWindow(QWidget):
         lay.addWidget(self.settings_page)
 
         self.adjustSize()
+        self._hook_screens()
+
+    # ---------------- 锚点 ----------------
+    def _hook_screens(self) -> None:
+        """屏幕几何 / DPI 一变就重新落位。
+
+        全屏游戏切出来、改分辨率、换缩放比例，Windows 都会给顶层窗口
+        发 WM_DPICHANGED，并附上一个"建议矩形"——那个矩形往往就在屏幕
+        中间，Qt 会照单全收。卡片贴托盘的位置是算出来的，不能交给系统，
+        所以这里盯住屏幕信号，一变就按锚点重新摆。
+        """
+        if self._screens_hooked:
+            return
+        self._screens_hooked = True
+        for screen in QGuiApplication.screens():
+            self._watch_screen(screen)
+        app = QGuiApplication.instance()
+        if app is not None:
+            try:
+                app.screenAdded.connect(self._watch_screen)
+            except Exception:
+                pass
+
+    def _watch_screen(self, screen) -> None:
+        if screen is None:
+            return
+        for sig in (screen.geometryChanged, screen.availableGeometryChanged,
+                    screen.logicalDotsPerInchChanged):
+            try:
+                sig.connect(self._on_screen_changed)
+            except Exception:
+                pass
+
+    def _on_screen_changed(self, *_args) -> None:
+        if self.isVisible():
+            QTimer.singleShot(0, self._reposition)
+
+    def _default_anchor(self, screen=None) -> QRect:
+        """没有可信托盘矩形时：光标所在屏幕的右下角。
+
+        取光标而不是主屏：多显示器下任务栏常在副屏，退回主屏会让卡片
+        出现在另一块屏幕上，用户以为"点不出来"。
+        """
+        if screen is None:
+            screen = (QGuiApplication.screenAt(QCursor.pos())
+                      or QGuiApplication.screenAt(self.frameGeometry().center())
+                      or QGuiApplication.primaryScreen())
+        geo = screen.availableGeometry()
+        return QRect(geo.right() - 56, geo.bottom() - 44, 24, 24)
+
+    def _anchor_for(self, rect: QRect | None) -> QRect:
+        """把托盘矩形变成可信锚点：必须是"一枚图标"，且贴着屏幕边缘。"""
+        if not tray_rect_ok(rect):
+            return self._default_anchor()
+        screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        edge = min(abs(rect.left() - geo.left()), abs(rect.top() - geo.top()),
+                   abs(rect.right() - geo.right()), abs(rect.bottom() - geo.bottom()))
+        if edge > TRAY_EDGE:
+            # Shell 给错了：不当它是托盘图标，退回屏幕角落
+            return self._default_anchor(screen)
+        return QRect(rect)
+
+    def _place_point(self) -> QPoint | None:
+        """按锚点算窗口左上角。锚点为空（还没 show 过）时返回 None。"""
+        anchor = self._anchor
+        if anchor.isNull() or anchor.width() <= 0:
+            return None
+        screen = QGuiApplication.screenAt(anchor.center()) or QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        w, h = self.width(), self.height()
+        x = self._clamp_x(anchor.center().x() - w // 2, w, geo)
+        # 任务栏在下（最常见）：底边贴着图标上方，内容变高时向上生长。
+        # 任务栏在上：反过来，卡片从图标下方展开，否则会整块翻到屏幕外。
+        if anchor.center().y() >= geo.center().y():
+            y = anchor.top() - SHADOW_GAP - h
+        else:
+            y = anchor.bottom() + SHADOW_GAP
+        y = max(geo.top() + 8, min(y, geo.bottom() - h - 8))
+        return QPoint(x, y)
+
+    def _keep_anchor(self) -> None:
+        """巡检：窗口被外部搬走（多半是 DPI 变化）就拉回托盘旁边。"""
+        if not self.isVisible() or self._placing:
+            return
+        anim = self._pos_anim
+        if anim is not None and anim.state() == QAbstractAnimation.Running:
+            return                       # 入场动画自己会收敛，别插手
+        point = self._place_point()
+        if point is None:
+            return
+        if abs(self.x() - point.x()) > ANCHOR_DRIFT or abs(self.y() - point.y()) > ANCHOR_DRIFT:
+            self._reposition()
+
+    def showEvent(self, ev) -> None:  # noqa: N802
+        super().showEvent(ev)
+        self._anchor_watch.start()
+
+    def hideEvent(self, ev) -> None:  # noqa: N802
+        self._anchor_watch.stop()
+        super().hideEvent(ev)
 
     # ---------------- 头部 ----------------
     def _build_header(self) -> QHBoxLayout:
@@ -117,6 +270,7 @@ class CardWindow(QWidget):
         # 多台时也没人靠它认设备。标题只留给设置页做页面名。
         self.header_label = QLabel("")
         self.header_label.setObjectName("HeaderLabel")
+        self.header_label.setVisible(False)
         row.addWidget(self.header_label, 0, Qt.AlignVCenter)
         row.addStretch(1)
 
@@ -159,10 +313,12 @@ class CardWindow(QWidget):
         lay.setSpacing(12)
 
         self._chips: dict[int, QPushButton] = {}
+        self._interval_group = QButtonGroup(page)
+        self._interval_group.setExclusive(True)
         block, self.interval_note = self._chip_block(
             "刷新间隔 · 分钟", [(m, str(m)) for m in INTERVALS],
             self._pick_interval, self._chips,
-            note="（上次刷新 —）",
+            note="（上次刷新 —）", group=self._interval_group,
         )
         lay.addLayout(block)
 
@@ -248,6 +404,10 @@ class CardWindow(QWidget):
 
     # ---------------- 交互 ----------------
     def _pick_interval(self, minutes: int) -> None:
+        # 间隔必须始终有一个选中项。再点当前项时先把选中态拉回来，不写成空。
+        self._sync_chips()
+        if minutes == self.config.interval_minutes:
+            return
         self.config.interval_minutes = minutes
         self._sync_chips()
         self.interval_changed.emit(minutes)
@@ -268,7 +428,6 @@ class CardWindow(QWidget):
         btn = self._theme_chips.get(mode)
         if btn is not None:
             self._start_reveal(self._reveal_origin(btn))
-        self._sync_theme_chips()
         self.theme_changed.emit(mode)
         # 写盘放最后，再错开 260ms：JSON + 落盘本身只要 ~1ms，但它落在
         # "点击 → 第一帧"这段最敏感的路径上就可能是掉一帧的元凶。等动效
@@ -331,9 +490,8 @@ class CardWindow(QWidget):
         center = QPoint(self.x() + self.width() // 2, self.y() + self.height() // 2)
         screen = QGuiApplication.screenAt(center) or QGuiApplication.primaryScreen()
         # 无边框窗口的坐标就是卡片外沿。毛玻璃只取中间那一块，不抓整屏。
-        base = QRect(self.pos() + QPoint(SHADOW_PAD, SHADOW_PAD), self.card.size())
-        region = base.adjusted(-BACKDROP_SIDE, -BACKDROP_TOP,
-                               BACKDROP_SIDE, BACKDROP_SIDE)
+        region = QRect(self.pos(), self.card.size()).adjusted(
+            -BACKDROP_SIDE, -BACKDROP_TOP, BACKDROP_SIDE, BACKDROP_SIDE)
         # 浅色霜化薄，背后窗口的矩形边会透出来。模糊加大，边才化开。
         light = theme.current_mode() == "light"
         ok = self._blur.capture(
@@ -360,6 +518,7 @@ class CardWindow(QWidget):
         self.gear_btn.setToolTip("返回" if self._settings_open else "设置")
         self.gear_btn.update()
         self.header_label.setText("设置" if self._settings_open else "")
+        self.header_label.setVisible(self._settings_open)
         self._relayout()
         self._reposition()
 
@@ -384,85 +543,137 @@ class CardWindow(QWidget):
         self.adjustSize()
 
     # ---------------- 主题 ----------------
-    def apply_theme(self, origin: QPoint | None = None) -> None:
+    def apply_theme(self) -> None:
         """全局换肤后刷新自身与所有子控件。
 
-        动效盖板由 _pick_theme 提前盖好（origin 参数仅为兼容旧调用，
-        现在圆心取自盖板创建时点中的那个选项框）。窗口没显示、或截不到
-        图时静静走普通切换，不播动效。
+        动效盖板由 _pick_theme 提前盖好，圆心取自被点中的那个选项框。
+        窗口没显示、或截不到图时静静走普通切换，不播动效。
+
+        这里必须保证 _finish_reveal 一定被执行：中途抛异常（某一行控件、
+        某个字体度量）就退出的话，盖板会停在原地不动 —— 屏幕上就是一张
+        冻住的旧皮肤，收不收得掉只能等看门狗，观感等于"点了没反应"。
         """
-        self.setStyleSheet(theme.qss())
-        self._sync_theme_chips()
-        for row in self._rows.values():
-            row.apply(row.device, animate=False)
-        self.card.update()
-        self.update()
-        # 只换颜色，尺寸本来不该变。真变了（字体回退之类）才重排重落位；
-        # 否则跳过这两步 —— 多一次 resize/move 就是肉眼可见的"抖一下"。
-        if self.sizeHint() != self.size():
-            self._relayout()
+        try:
+            self.setStyleSheet(theme.qss())
+            self._sync_theme_chips()
+            for row in self._rows.values():
+                try:
+                    row.apply(row.device, animate=False)
+                except Exception:
+                    pass
+            self.card.update()
+            self.update()
+            # 换色不该改尺寸，但真变了（字体回退）就得重排；同时顺手核对
+            # 一次位置 —— 切屏/DPI 变化可能刚把窗口搬到别处。
+            if self.sizeHint() != self.size():
+                self._relayout()
             if self.isVisible():
                 self._reposition()
-        self._sync_overlay()
-        self._finish_reveal()
+        finally:
+            self._sync_overlay()
+            self._finish_reveal()
 
     # ---------------- 换肤动效 ----------------
-    def _card_global_rect(self) -> QRect:
-        """卡片本体在屏幕上的矩形。窗口就是卡片本体，两者一致。"""
-        return QRect(self.card.mapToGlobal(QPoint(0, 0)), self.card.size())
-
     def _card_snapshot(self):
         """截一张卡片本体。
 
-        卡片四周的投影已经去掉（窗口边界 == 卡片边界），整窗截图就是卡片
-        本体；SHADOW_PAD 仍保留在代码里，是为了万一以后再给投影留边时，
-        这里还能按留白裁掉 —— 半透明投影贴进盖板会和新皮肤再叠一层，
-        圆内更黑、收尾忽然变淡，看着像抖一下。
+        窗口边界 == 卡片边界，整窗截图就是卡片本体，不需要再裁剪。
+
+        盖板现在是卡片的子控件，抓图前必须先把它藏一瞬（否则抓到的就是
+        盖板里那张旧图，新皮肤永远揭不开）。藏→抓→显示全在同一个事件里，
+        中间不会回到事件循环，屏幕上不会闪。
         """
         if not self.isVisible():
             return None
-        pm = self.grab()
+        overlay = self._reveal
+        hidden = overlay is not None and overlay.active and not overlay.isHidden()
+        if hidden:
+            overlay.hide()
+        try:
+            pm = self.grab()
+        finally:
+            if hidden and overlay.active:
+                overlay.show()
+                overlay.raise_()
         if pm is None or pm.isNull():
             return None
-        if SHADOW_PAD <= 0:
-            # 窗口就是卡片本体，整张图都是要的，不用再裁一刀
-            return pm
-        dpr = pm.devicePixelRatio() or 1.0
-        rect = QRect(round(SHADOW_PAD * dpr), round(SHADOW_PAD * dpr),
-                     round(self.card.width() * dpr), round(self.card.height() * dpr))
-        out = pm.copy(rect)
-        out.setDevicePixelRatio(dpr)
-        return out
+        return pm
 
     def _start_reveal(self, origin: QPoint | None) -> RevealOverlay | None:
         """第一步：趁皮肤还没换，截旧图、盖盖板。
 
         盖板贴的就是旧皮肤，所以从它出现到揭开之间，屏幕上始终是旧皮肤
         或"旧皮肤被圆一点一点换成新皮肤"，不会闪出一张裸的新皮肤。
+
+        `origin` 拿不到（控件还没布局、已经滚出视图）不算失败 —— 退回
+        卡片中心继续播。宁可圆心偏一点，也不要"点了没反应"。
         """
         self._drop_reveal()
-        if origin is None or not self.isVisible():
+        if not self.isVisible():
             return None
-        before = self._card_snapshot()
+        if origin is None:
+            origin = QPoint(self.card.width() // 2, self.card.height() // 2)
+        # 记一下"人刚在卡片里点过东西"：接下来一秒多里谁都不许把卡片收起。
+        # 悬停弹出的卡片本来就没抢到前台，别的应用一抢焦点就会走到
+        # _confirm_deactivate，一次误判就能把正在播动效的卡片抽走。
+        self._interact_stamp = time.monotonic()
+        try:
+            before = self._card_snapshot()
+        except Exception:
+            before = None
         if before is None or before.isNull():
             return None
-        overlay = RevealOverlay(self, before, origin, self._card_global_rect(),
-                                on_closed=self._on_reveal_closed)
+        try:
+            overlay = RevealOverlay(self.card, before, origin,
+                                    on_closed=self._on_reveal_closed)
+        except Exception:
+            return None
         if not overlay.active:
             return None
         self._reveal = overlay
-        # 让盖板真正映射到屏幕上再动皮肤：此刻还没换肤，怎么画都不会闪
-        QGuiApplication.processEvents()
+        self._reveal_gen += 1
+        gen = self._reveal_gen
+        # 看门狗：盖板亮着但动画没起来的任何情况，到点强制收掉。
+        # 它是子控件、不吃鼠标，所以收不掉也不会点不动；这道保险防的是
+        # "旧皮肤一直冻在卡片上"，那看起来就像换肤没生效。
+        QTimer.singleShot(REVEAL_WATCHDOG_MS, lambda: self._reveal_timeout(gen))
+        # 旧皮肤必须先真正画到屏幕上，再换肤；这里用 repaint 同步重绘，
+        # 不用 processEvents —— 后者会把排队的鼠标事件（包括这次点击的
+        # 抬起、下一次点击）在按钮的处理函数里重入进来，是"点完按钮状态
+        # 卡住、后面点不动"的典型来源。
+        try:
+            overlay.repaint()
+        except Exception:
+            pass
         return overlay
+
+    def _reveal_timeout(self, gen: int, retries: int = 3) -> None:
+        overlay = self._reveal
+        if gen != self._reveal_gen or overlay is None or not overlay.active:
+            return
+        if overlay.animating() and retries > 0:
+            # 动效在播，给它收尾的时间（正常 780ms 内必结束）。
+            # 只多等 3 轮：真卡死的动画不应该被无限期放过。
+            QTimer.singleShot(400, lambda: self._reveal_timeout(gen, retries - 1))
+            return
+        self._drop_reveal()
 
     def _on_reveal_closed(self, overlay) -> None:
         # 盖板播完自毁后第一时间松手，别攥着一个已删除的 C++ 包装
         if self._reveal is overlay:
             self._reveal = None
 
+    def reveal_active(self) -> bool:
+        """换肤盖板是否还活着（正在播 / 还没收尾）。"""
+        overlay = self._reveal
+        return overlay is not None and overlay.active
+
     def _finish_reveal(self) -> None:
-        """第二步：皮肤已换完。截新图（盖板是独立窗口，不会被截进去），
-        开始圆形揭开。"""
+        """第二步：皮肤已换完。截新图、开始圆形揭开。
+
+        盖板是卡片自己的子控件，没盖满就拿旧图去揭会露边，所以先让它
+        对齐新的卡片尺寸，再截新图。
+        """
         overlay = self._reveal
         if overlay is None or not overlay.active:
             self._drop_reveal()
@@ -470,15 +681,24 @@ class CardWindow(QWidget):
         if not self.isVisible():
             self._drop_reveal()
             return
-        # 新皮肤在盖板底下先画完，grab 才截得到它；盖板盖着，用户看不见
-        QGuiApplication.processEvents()
-        overlay.set_new_and_start(self._card_snapshot())
+        # grab() 是同步渲染，不依赖屏幕刷新，也不必 processEvents；
+        # 先把新皮肤画出来再截，图才是新的。
+        try:
+            self._sync_overlay()
+            self.repaint()
+            overlay.set_new_and_start(self._card_snapshot())
+        except Exception:
+            self._drop_reveal()
 
     def _drop_reveal(self) -> None:
+        self._reveal_gen += 1          # 作废所有在路上的看门狗
         overlay = self._reveal
         self._reveal = None
         if overlay is not None and overlay.active:
-            overlay.close_reveal()
+            try:
+                overlay.close_reveal()
+            except Exception:
+                pass
 
     def _sync_overlay(self) -> None:
         overlay = self._reveal
@@ -486,7 +706,7 @@ class CardWindow(QWidget):
             if not overlay.isVisible():
                 overlay.show()
                 overlay.raise_()
-            overlay.sync_geometry(self._card_global_rect())
+            overlay.sync_geometry()
 
     def _reveal_origin(self, widget: QWidget) -> QPoint | None:
         """控件中心映射到**卡片本体**坐标，并夹进卡片范围（盖板只盖卡片）。
@@ -515,20 +735,20 @@ class CardWindow(QWidget):
                 row.setParent(None)
                 row.deleteLater()
 
+        # 走一遍列表：缺的补上、有的就地更新、位置不对的搬过去。
+        # 以前拆成"先建后排序"两轮，顺序纠正那一轮还要再查一次 indexOf，
+        # 同一台设备被碰两次；现在一轮解决，动画也不会重复触发。
         for index, device in enumerate(devices):
             row = self._rows.get(device.key)
             if row is None:
                 row = DeviceRow(device, animate=animate)
                 self._rows[device.key] = row
-                self.devices_box.insertWidget(index, row)
             else:
                 row.apply(device, animate=animate)
-        # 保证顺序
-        for index, device in enumerate(devices):
-            row = self._rows.get(device.key)
-            if row is not None and self.devices_box.indexOf(row) != index:
+                if self.devices_box.indexOf(row) == index:
+                    continue
                 self.devices_box.removeWidget(row)
-                self.devices_box.insertWidget(index, row)
+            self.devices_box.insertWidget(index, row)
 
         self.empty_label.setVisible(not devices)
         if not devices:
@@ -543,7 +763,7 @@ class CardWindow(QWidget):
 
     def set_last_refresh(self, hhmm: str) -> None:
         """标题旁小字：上次刷新时间（HH:mm）。"""
-        if getattr(self, "interval_note", None) is not None:
+        if self.interval_note is not None:
             self.interval_note.setText(
                 f"（上次刷新 {hhmm}）" if hhmm else "（上次刷新 —）"
             )
@@ -558,6 +778,14 @@ class CardWindow(QWidget):
             # 只有正在转（手动刷新）才播"完成对勾"，自动刷新静默收尾
             self.refresh_btn.finish()
 
+    @staticmethod
+    def _sync_switch(switch: ToggleSwitch, on: bool) -> None:
+        """把开关拨到配置值，但不触发 toggled（否则会回写一遍配置）。"""
+        switch.blockSignals(True)
+        switch.setChecked(on)
+        switch.set_knob(1.0 if on else 0.0)
+        switch.blockSignals(False)
+
     def sync_from_config(self) -> None:
         """外部（菜单/注册表）改动后同步控件，不触发回写。"""
         self._syncing = True
@@ -568,42 +796,46 @@ class CardWindow(QWidget):
             self.card.set_enabled(glass)
             if glass:
                 self._attach_glass()
-            sw_glass = self.glass_switch
-            sw_glass.blockSignals(True)
-            sw_glass.setChecked(glass)
-            sw_glass.set_knob(1.0 if glass else 0.0)
-            sw_glass.blockSignals(False)
-
-            value = bool(self.config.get("autostart"))
-            switch = self.autostart_switch
-            switch.blockSignals(True)
-            switch.setChecked(value)
-            switch.set_knob(1.0 if value else 0.0)
-            switch.blockSignals(False)
+            self._sync_switch(self.glass_switch, glass)
+            self._sync_switch(self.autostart_switch, bool(self.config.get("autostart")))
         finally:
             self._syncing = False
 
     # ---------------- 窗口行为 ----------------
+    def hidden_recently(self, seconds: float) -> bool:
+        """刚刚才收起过吗（托盘连点去抖、悬停重开防抖共用）。"""
+        return time.monotonic() - self._hide_stamp < seconds
+
     def show_near(self, tray_rect: QRect, activate: bool = True) -> None:
         """显示卡片。activate=False 用于悬停弹出：只出现，不抢当前窗口的焦点。"""
-        screen = QGuiApplication.screenAt(tray_rect.center()) or QGuiApplication.primaryScreen()
-        geo = screen.availableGeometry()
         self._relayout()
         self.resize(self.sizeHint())
 
-        # 以托盘图标为锚点：底边贴着图标上方，内容变高时向上生长
-        self._anchor_x = tray_rect.center().x()
-        # 锚点是窗口底边；窗口边界 == 卡片边界，直接留出 SHADOW_GAP 即可
-        self._anchor_bottom = min(
-            tray_rect.top() - SHADOW_GAP + SHADOW_PAD, geo.bottom() - 4
-        )
+        # 锚点先过一遍合法性：游戏中切屏后 Shell 可能给回一块屏幕中间的
+        # 矩形，照它落位卡片就会"跑到屏幕中间"。不合法的锚点退回屏幕角。
+        self._anchor = self._anchor_for(tray_rect)
+        point = self._place_point()
+        if point is None:
+            self._anchor = self._default_anchor()
+            point = self._place_point() or QPoint(0, 0)
+        x, y = point.x(), point.y()
 
-        w, h = self.width(), self.height()
-        x = self._clamp_x(self._anchor_x - w // 2, w, geo)
-        y = max(geo.top() + 8, self._anchor_bottom - h)
+        # 上一轮的 hide 动画可能还在播（isVisible() 仍为 True）。这时抓底图
+        # 抓到的是卡片自己（毛玻璃退回实底），落位也会按旧尺寸算，
+        # 所以重开前先把窗口真正藏掉。盖板（卡片的子控件）一起收掉：
+        # 重新弹出是从"没有盖板"的状态开始的。
+        self._drop_reveal()
+        if self.isVisible():
+            if self._hide_anim is not None:
+                self._hide_anim.stop()
+            self.hide()
 
         self.setWindowOpacity(0.0)
-        self.move(x, y + 10)
+        self._placing = True
+        try:
+            self.move(x, y + 10)
+        finally:
+            self._placing = False
 
         # 抓一张屏幕当毛玻璃底图：此刻卡片还没显示，抓到的正是它背后的画面。
         # 开不开毛玻璃都抓，点开关时才有现成的材质可换。
@@ -618,6 +850,7 @@ class CardWindow(QWidget):
         self._hover_shown = not activate
         if activate:
             self.activateWindow()
+            self._force_foreground()
 
         anim_pos = QPropertyAnimation(self, b"pos", self)
         anim_pos.setDuration(160)
@@ -642,44 +875,71 @@ class CardWindow(QWidget):
         if self.isVisible():
             self._reposition()
 
+    def _force_foreground(self) -> None:
+        """把卡片真正提到前台。
+
+        全屏游戏或别的应用占着前台时，Qt 的 activateWindow() 会被 Windows
+        拒绝（前台锁定）。卡片虽然置顶显示，鼠标点击却仍然落进游戏，
+        表现就是"卡片弹出来了，但点什么都没反应"。这里借前台线程的输入
+        队列把 SetForegroundWindow 发出去 —— 只在用户明确点托盘图标
+        （activate=True）时调用，悬停弹出绝不抢焦点。
+        """
+        try:
+            user32, kernel32 = _windows_api()
+            hwnd = int(self.winId())
+            fg = int(user32.GetForegroundWindow())
+            if fg == hwnd:
+                return
+            tid_fg = int(user32.GetWindowThreadProcessId(fg, None)) if fg else 0
+            tid_me = int(kernel32.GetCurrentThreadId())
+            attached = False
+            if tid_fg and tid_fg != tid_me:
+                attached = bool(user32.AttachThreadInput(tid_me, tid_fg, True))
+            try:
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetFocus(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(tid_me, tid_fg, False)
+        except Exception:
+            pass
+
     @staticmethod
     def _clamp_x(x: int, w: int, geo) -> int:
         return max(geo.left() + 8, min(x, geo.right() - w - 8))
 
     def _reposition(self) -> None:
-        anchor_bottom = getattr(self, "_anchor_bottom", None)
-        if anchor_bottom is None:
+        point = self._place_point()
+        if point is None:
             return
         # 入场位移动画记的是"展开那一刻的高度"算出的坐标。页面变高（比如刚切到
         # 设置页）时它还在播，就会一帧一帧把窗口拉回下面的旧位置——表现为
         # "第一次打开设置，弹窗往下掉"。内容一变就让动画先退场，落位以新高度为准。
-        anim = getattr(self, "_pos_anim", None)
+        anim = self._pos_anim
         if anim is not None and anim.state() == QAbstractAnimation.Running:
             anim.stop()
-        screen = (QGuiApplication.screenAt(QPoint(self._anchor_x, anchor_bottom))
-                  or QGuiApplication.primaryScreen())
-        geo = screen.availableGeometry()
-        w, h = self.width(), self.height()
-        x = self._clamp_x(self._anchor_x - w // 2, w, geo)
-        y = max(geo.top() + 8, anchor_bottom - h)
-        self.move(x, y)
-
-    def moveEvent(self, ev) -> None:  # noqa: N802
-        # 盖板是独立窗口，卡片挪窝它不会跟着走，得手动拽一把
-        self._sync_overlay()
-        super().moveEvent(ev)
+            self._pos_anim = None
+        if (self.x(), self.y()) == (point.x(), point.y()):
+            return
+        self._placing = True
+        try:
+            self.move(point)
+        finally:
+            self._placing = False
 
     def resizeEvent(self, ev) -> None:  # noqa: N802
+        # 盖板是卡片的子控件，挪窝它自己会跟着走；但尺寸不会跟着长，
+        # 得手动铺满，否则圆揭到边上会露出新皮肤的一条边。
         self._sync_overlay()
         super().resizeEvent(ev)
 
     def hide_card(self) -> None:
         if not self.isVisible():
             return
-        import time
 
         self._hide_stamp = time.monotonic()
-        # 卡片要没了，盖板没有继续存在的意义
+        # 卡片要没了，盖板没有继续存在的意义（同时作废挂着的看门狗）
         self._drop_reveal()
         anim_op = QPropertyAnimation(self, b"windowOpacity", self)
         anim_op.setDuration(100)
@@ -722,18 +982,16 @@ class CardWindow(QWidget):
     def _confirm_deactivate(self, gen: int, tries: int) -> None:
         """确认"真的失焦了"再收起。
 
-        为什么不能收到 WindowDeactivate 就藏：换肤动效的盖板是另一个顶层
-        窗口，盖板出现、销毁，以及换肤时的整窗重刷，都会让 Windows 给卡片
-        补一个 WA_INACTIVE（Qt 就翻译成 WindowDeactivate），可前台窗口其实
-        一直是卡片自己。此时若照旧 hide_card，表现就是"点一下颜色，卡片
-        瞬间消失"——点了毛玻璃之后特别容易撞上，因为那次点击一定会先立一块
-        盖板。
+        为什么不能收到 WindowDeactivate 就藏：换肤时整窗重刷、卡片被系统
+        重新摆位、盖板（现在是子控件，以前是顶层窗口）出现，都可能让
+        Windows 给卡片补一个 WA_INACTIVE（Qt 就翻译成 WindowDeactivate），
+        可前台窗口其实一直是卡片自己。此时若照旧 hide_card，表现就是
+        "点一下颜色，卡片瞬间消失"。
 
         所以这里做三件事：
         1. 延后 140ms 再判断，把同一轮的连串假失活折叠掉；
-        2. 用原生前台窗口核对 —— 前台还是卡片（或盖板）就说明是假信号，
-           不动；盖板还在播动效时也先不动（把卡片藏了，盖板上那张旧图
-           会孤零零悬在空中），隔一会儿再问；
+        2. 用原生前台窗口核对 —— 前台还是卡片就说明是假信号，不动；
+           盖板还在播动效时也先不动（把卡片藏了，动效就被剪断了）；
         3. 光标还压在卡片上就说明没人去点别处，同样按噪声丢掉 ——
            点完颜色/开关那一瞬间，鼠标必定还在卡片里。
         """
@@ -741,16 +999,22 @@ class CardWindow(QWidget):
             return                     # 已有更新的一轮判断，交给它
         if self._suppress_hide:
             return
-        overlay = self._reveal
-        if overlay is not None and overlay.active and tries < 16:
+        if self.reveal_active() and tries < 16:
             # 盖板还在（最多 780ms 动效 + 收尾），等它播完再核实，
             # 否则卡片可能在"圆还没揭开"时就没了
-            if not overlay.isVisible():
-                overlay.show()
-                overlay.raise_()
+            self._sync_overlay()
             QTimer.singleShot(120, lambda: self._confirm_deactivate(gen, tries + 1))
             return
         if self._foreground_is_ours():
+            return
+        # 刚点过换肤/毛玻璃：动效还在路上。悬停弹出的卡片本来就没有前台
+        # 身份，这段时间里的失活一律当噪声 —— 一收起来，盖板上那张旧皮
+        # 就得孤零零留在屏幕上，动效也跟着没了。但不吞掉这次判断：
+        # 等宽限期过完再核实一遍，用户真去点别处时卡片照样会收。
+        wait = INTERACT_GRACE - (time.monotonic() - self._interact_stamp)
+        if wait > 0 and tries < 8:
+            QTimer.singleShot(int(wait * 1000) + 40,
+                              lambda: self._confirm_deactivate(gen, tries + 1))
             return
         if self._cursor_over_card():
             # 鼠标还在卡片里，人就不可能"去点了别的窗口"——这次的失活
@@ -765,36 +1029,26 @@ class CardWindow(QWidget):
     def _cursor_over_card(self) -> bool:
         """光标是否还压在卡片上（含 4px 容差）。"""
         try:
-            from PySide6.QtGui import QCursor
-
             return self.frameGeometry().adjusted(-4, -4, 4, 4).contains(QCursor.pos())
         except Exception:
             return False
 
     def _foreground_is_ours(self) -> bool:
-        """原生前台窗口是不是本卡片（或换肤盖板）。
+        """原生前台窗口是不是本卡片。
 
-        Qt 的 isActiveWindow()/activeWindow() 在有盖板这类
-        NOACTIVATE 顶层窗口时并不可靠（实测会把 activeWindow 记成 None），
-        所以直接问一次系统。
+        换肤盖板现在是卡片的子控件，不再单独占一个顶层窗口，所以前台
+        只可能是卡片自己 —— 早先那种"盖板一出现就给卡片补一个假失活"
+        的来源也随之消失。这里仍然直接问系统：Qt 的 isActiveWindow()
+        在无边框工具窗口上有时候会记账记错。
         """
         try:
-            import ctypes
-
-            fg = int(ctypes.windll.user32.GetForegroundWindow())
+            user32, _kernel32 = _windows_api()
+            fg = int(user32.GetForegroundWindow())
         except Exception:
             return False
         if not fg:
             return False                 # 查不到就别当"还是自己"，交给下面按失焦处理
         try:
-            if fg == int(self.winId()):
-                return True
+            return fg == int(self.winId())
         except Exception:
-            pass
-        overlay = self._reveal
-        if overlay is not None and overlay.active:
-            try:
-                return fg == int(overlay.winId())
-            except Exception:
-                return False
-        return False
+            return False

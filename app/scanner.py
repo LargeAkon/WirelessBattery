@@ -67,7 +67,6 @@ class Scanner:
 
         merged = self._merge(found, debug)
         merged = self._apply_prefs(merged)
-        merged.sort(key=lambda d: d.sort_key())
 
         # 失败容错：读不到时沿用上次有效读数。
         #

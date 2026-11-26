@@ -56,34 +56,9 @@ class Device:
             return "--"
         return str(int(round(self.level)))
 
-    @property
-    def meta_text(self) -> str:
-        parts = [self.type_label]
-        state = (self.raw or {}).get("state")
-        if self.charging:
-            parts.append("充电中")
-        elif self.level is None:
-            if state == "无电量接口":
-                # 接收器确实在，但固件不提供电量通道 —— 说清楚，别让人以为在等应答
-                parts.append("不提供电量")
-            elif state == "超时":
-                parts.append("信号中断")
-            else:
-                parts.append("设备休眠" if state == "休眠" else "等待应答")
-        elif state == "超时":
-            # 数值是上一次成功读到的，不是刚读到的 —— 必须讲清楚，否则会被当成实时值
-            parts.append("信号中断 · 上次读数")
-        elif self.level <= 15:
-            parts.append("电量告急")
-        elif self.level <= 30:
-            parts.append("电量偏低")
-        if self.transport:
-            parts.append(self.transport)
-        return " · ".join(parts)
-
     def sort_key(self):
+        """列表顺序：类型 → 名字。"""
         order = {MOUSE: 0, KEYBOARD: 1, HEADSET: 2, GAMEPAD: 3, UNKNOWN: 4}
-        return (order.get(self.kind, 3), self.name)
-
-    def signature(self) -> tuple:
-        return (self.key, self.name, self.kind, self.level, self.charging)
+        # 兜底也必须是"未知"那一档；以前写死 3，等于把认不出的设备
+        # 排到手柄堆里（顺序会莫名其妙地跳）。
+        return (order.get(self.kind, order[UNKNOWN]), self.name)

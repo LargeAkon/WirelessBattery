@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QScreen, qRgb
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QScreen
 from PySide6.QtWidgets import (
     QApplication, QGraphicsBlurEffect, QGraphicsPixmapItem, QGraphicsScene,
 )
@@ -35,7 +35,7 @@ def _grade(img: QImage, lift: float | None = None,
     """一次遍历完成提亮 + 饱和度调整。
 
     `QImage.bits()` 拿的是可写 memoryview，比 setPixelColor 快两个数量级；
-    只在 1/5 的缩略图上跑，几十毫秒。
+    只在缩小后的缩略图上跑，几十毫秒。
     """
     # 参数默认取模块常量（运行时读取，方便整体调材质，也方便单独覆盖）
     lift = LIFT if lift is None else lift
@@ -126,7 +126,6 @@ class ScreenBlur:
         self.origin = QPoint(0, 0)
         self.scale = 1.0          # 模糊图像素 / 逻辑像素
         self.brightness = 128.0   # 底图平均亮度 0–255，用来决定染色厚薄
-        self.chroma = 0.0         # 底图平均彩度，用来决定染色是否要更厚（越花越要压）
 
     def release(self) -> None:
         self.image = None
@@ -167,21 +166,10 @@ class ScreenBlur:
             self.origin = grab.topLeft()
             self.scale = self.image.width() / float(grab.width())
             self.brightness = _mean_light(self.image)
-            self.chroma = self._mean_chroma(self.image)
             return True
         except Exception:
             self.image = None
             return False
-
-    @staticmethod
-    def _mean_chroma(img: QImage) -> float:
-        tiny = img.scaled(32, 18, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        total = 0.0
-        for y in range(tiny.height()):
-            for x in range(tiny.width()):
-                c = tiny.pixelColor(x, y)
-                total += max(c.red(), c.green(), c.blue()) - min(c.red(), c.green(), c.blue())
-        return total / max(1, tiny.width() * tiny.height())
 
     @property
     def ready(self) -> bool:

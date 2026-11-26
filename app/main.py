@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import sys
 from pathlib import Path
 
@@ -10,8 +11,8 @@ BASE = Path(__file__).resolve().parent
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from PySide6.QtCore import QTime, QTimer, Qt, QThread, Signal                # noqa: E402
-from PySide6.QtGui import QAction, QIcon                                      # noqa: E402
+from PySide6.QtCore import QRect, QTime, QTimer, Qt, QThread, Signal          # noqa: E402
+from PySide6.QtGui import QAction, QCursor, QIcon                             # noqa: E402
 from PySide6.QtWidgets import (                                               # noqa: E402
     QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 )
@@ -24,7 +25,7 @@ from model import Device                                                      # 
 from scanner import Scanner                                                   # noqa: E402
 from trayhover import TrayHover                                               # noqa: E402
 from ui import icons                                                          # noqa: E402
-from ui.card import CardWindow                                                # noqa: E402
+from ui.card import CardWindow, tray_rect_ok                                  # noqa: E402
 from ui.diag import DiagWindow                                                # noqa: E402
 
 # 充电时的自动刷新间隔：用户设的 10/15/20 分钟是给"不充电、省电"用的，
@@ -61,6 +62,10 @@ class TrayApp:
         self.devices: list[Device] = []
         self.debug_lines: list[str] = []
         self._worker: ScanWorker | None = None
+        # 逻辑上的"这一轮扫描还在跑"。跟 _worker 分开记：线程对象要活到
+        # finished 才算完（运行中被回收 Qt 会 abort），而按钮/定时器要的
+        # 是「结果到了没有」，两者差一拍。
+        self._scanning = False
         self._diag: DiagWindow | None = None
         # 充电动画：预渲染的几帧图标 + 轮换定时器
         self._tray_frames: list[QIcon] = []
@@ -111,18 +116,8 @@ class TrayApp:
         QTimer.singleShot(250, lambda: self.refresh())
 
     # ---------------- 菜单 ----------------
-    def _menu_qss(self) -> str:
-        return (
-            f"QMenu {{ background:{theme.BG_SOFT}; color:{theme.TEXT};"
-            f" border:1px solid {theme.STROKE_STRONG}; border-radius:10px; padding:6px; }}"
-            f"QMenu::item {{ padding:7px 22px 7px 14px; border-radius:6px; font-size:12px; }}"
-            f"QMenu::item:selected {{ background:{theme.INK_SOFT}; color:{theme.TEXT}; }}"
-            f"QMenu::separator {{ height:1px; background:{theme.STROKE}; margin:5px 8px; }}"
-        )
-
     def _build_menu(self) -> QMenu:
         menu = QMenu()
-        menu.setStyleSheet(self._menu_qss())
         act_refresh = QAction("立即刷新", menu)
         act_refresh.triggered.connect(lambda: self.refresh(manual=True))
         menu.addAction(act_refresh)
@@ -163,17 +158,19 @@ class TrayApp:
                 self.card.hide_card()
                 return
             # 失焦自动隐藏与再次点击可能同帧发生，做一次去抖
-            import time
-
-            if time.monotonic() - getattr(self.card, "_hide_stamp", 0.0) < 0.35:
+            if self.card.hidden_recently(0.35):
                 return
             self.show_card()
 
     def show_card(self) -> None:
         rect = self.tray.geometry()
-        if rect.isNull() or rect.width() == 0:
-            screen = self.app.primaryScreen().availableGeometry()
-            rect = screen.adjusted(screen.width() - 40, screen.height() - 40, 0, 0)
+        if not tray_rect_ok(rect):
+            # 图标被折进「^」/ 任务栏自动隐藏 / 全屏游戏切回来时拿不到
+            # 可信矩形：退到光标所在屏幕的右下角。原来是 primaryScreen，
+            # 多显示器下会弹到另一块屏；拿整条任务栏当锚点则会跑到屏幕中间。
+            screen = self.app.screenAt(QCursor.pos()) or self.app.primaryScreen()
+            geo = screen.availableGeometry()
+            rect = QRect(geo.right() - 56, geo.bottom() - 40, 24, 24)
         self.card.show_near(rect)
 
     # ---------------- 图标与提示 ----------------
@@ -240,7 +237,8 @@ class TrayApp:
                 lines.append(f"{dev.name}  {dev.percent_text}%{mark}")
         return "\n".join(lines)
 
-    def _on_hover_support(self, ok: bool) -> None:
+    def _on_hover_support(self, _ok: bool) -> None:
+        # 悬停可用与否只影响"要不要显示原生文字提示"，见 _sync_tooltip
         self._sync_tooltip()
 
     def _sync_tooltip(self) -> None:
@@ -254,8 +252,8 @@ class TrayApp:
             self.tray.setToolTip(text)
 
     # ---------------- 刷新 ----------------
-    def refresh(self, manual: bool = False, force: bool = None) -> None:
-        if self._worker and self._worker.isRunning():
+    def refresh(self, manual: bool = False, force: bool | None = None) -> None:
+        if self._scanning:
             return
         if force is None:
             force = manual
@@ -263,12 +261,24 @@ class TrayApp:
             self.card.set_loading(True)
         worker = ScanWorker(self.config, with_debug=False, force=force)
         worker.done.connect(self._on_scan_done)
-        worker.finished.connect(worker.deleteLater)
+        # 线程真正结束后再释放引用：done 到达时线程可能还没退完，
+        # 这时候换下一位会让 QThread 在运行中被析构（Qt 直接 abort）。
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._scanning = True
         self._worker = worker
         worker.start()
 
+    def _on_worker_finished(self, worker) -> None:
+        if worker is not None:
+            worker.deleteLater()
+        if self._worker is worker:
+            self._worker = None
+        # 线程都退完了，这一轮一定结束了。万一 done 没送到（异常路径），
+        # 这里兜住：否则 _scanning 永远是 True，之后再也刷不动。
+        self._scanning = False
+
     def _on_scan_done(self, devices: list, debug: list, error: str) -> None:
-        self._worker = None
+        self._scanning = False
         self.devices = devices
         if debug:
             self.debug_lines = debug
@@ -291,7 +301,8 @@ class TrayApp:
             self.timer.setInterval(ms)
 
     # ---------------- 设置联动 ----------------
-    def _on_interval_changed(self, minutes: int) -> None:
+    def _on_interval_changed(self, _minutes: int) -> None:
+        # 间隔已经写进 config，这里只按"是否充电"重算定时器
         self._sync_timer_interval()
 
     def _on_menu_autostart(self, checked: bool) -> None:
@@ -317,7 +328,6 @@ class TrayApp:
         theme.set_mode(mode)
         self.app.setStyleSheet(theme.qss())
         self.card.apply_theme()
-        self.menu.setStyleSheet(self._menu_qss())
         # 托盘图标配色已固定（不随深浅主题变化），这里不用重建图标
         if self._diag:
             self._diag.apply_theme()
@@ -335,6 +345,16 @@ class TrayApp:
     def quit(self) -> None:
         self.timer.stop()
         self.hover.stop()
+        self.tray_pulse.stop()
+        # 扫描线程还在跑就别让它被析构：QThread 在运行中被销毁，Qt 会
+        # 直接 abort（用户看到的是"退出时闪一下报错"）。等一小会儿，
+        # 等不到就结束进程 —— 配置文件早已落盘，没有未保存状态。
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker.wait(1200)
+            if worker.isRunning():
+                self.tray.hide()
+                os._exit(0)
         self.tray.hide()
         self.app.quit()
 

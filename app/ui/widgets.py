@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import (
     Property, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
@@ -38,7 +39,6 @@ class BatteryBar(QWidget):
         self._unavailable = False
         self._phase = 0.0
         self.setFixedHeight(4)
-        self.setMinimumHeight(4)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._anim = QPropertyAnimation(self, b"value", self)
         self._anim.setDuration(520)
@@ -338,7 +338,6 @@ class IconButton(QAbstractButton):
         """开始旋转；已在转就保持，避免连点导致角度跳回 0。"""
         if self._state == "spinning":
             return
-        import time
 
         self._state = "spinning"
         self._spin_started = time.monotonic()
@@ -359,7 +358,6 @@ class IconButton(QAbstractButton):
         """数据回来了：停转并播放对勾。非旋转状态调用无副作用（自动刷新不会误触发）。"""
         if self._state != "spinning":
             return
-        import time
 
         elapsed = (time.monotonic() - self._spin_started) * 1000
         delay = int(max(0.0, self.MIN_SPIN_MS - elapsed))
@@ -476,9 +474,6 @@ class ElidedLabel(QLabel):
         elided = metrics.elidedText(self._full, Qt.ElideRight, avail)
         if elided != super().text():
             super().setText(elided)
-
-    def full_text(self) -> str:
-        return self._full
 
 
 class DeviceIconTile(QWidget):
@@ -651,7 +646,6 @@ class DeviceRow(QFrame):
     def __init__(self, device: Device, animate: bool = True, parent=None):
         super().__init__(parent)
         self.device = device
-        self._animate = animate
         self.setFixedHeight(44)
 
         lay = QHBoxLayout(self)
@@ -701,4 +695,5 @@ class DeviceRow(QFrame):
         self.bar.set_level(device.level, animate)
         self.bar.set_charging(charging and not unavailable)
         self.tile.device = device
+        self.tile.dim = unavailable
         self.tile.update()

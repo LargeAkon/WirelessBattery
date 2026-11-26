@@ -52,6 +52,10 @@ def cooled(key: tuple, force: bool) -> bool:
 
 def mark_fail(key: tuple, seconds: float = COOLDOWN) -> None:
     if deferred():
+        # 只保护紧随其后的这一次判定：让位是这一台设备这一轮的事，
+        # 不能留在 thread-local 里，否则同一轮后面真正失败的设备
+        # 也会被当成"让位"而不进冷却，下一轮又去白等一次超时。
+        _local.deferred = False
         return                         # 让位不是设备的错
     _FAIL[key] = time.monotonic() + seconds
 

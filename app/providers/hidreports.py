@@ -46,6 +46,12 @@ def _parse(desc: bytes) -> dict[str, dict[int, int]]:
             if tag == 7:                        # Report Size
                 size = value
             elif tag == 8:                      # Report ID：换号即换报文
+                if value != report_id:
+                    # 换了报文号，位计数必须从头开始。以前这里不清零，
+                    # 后续报文号的长度会把前面所有报文的位数累加进来，
+                    # 于是 io_lengths 的"最大长度"偏大，靠长度认设备的
+                    # 型号（如迈从、ATK）就永远匹配不上。
+                    bits = {"in": 0, "out": 0, "feat": 0}
                 report_id = value
             elif tag == 9:                      # Report Count
                 count = value

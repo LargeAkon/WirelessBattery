@@ -18,22 +18,24 @@
 """
 from __future__ import annotations
 
+import platform
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QStandardPaths, QThread, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
 import autodiag
 import theme
-from config import APP_VERSION, Config
+from config import APP_VERSION, Config, config_dir
 from model import Device
 from providers import raw_hid
 from ui.adddevice import AddDeviceWindow
-from ui.rows import Row
+from ui.rows import Row, clear_layout, scroll_list, setup_dialog
 from vendors import describe as describe_vendor
 
 
@@ -89,10 +91,7 @@ class DiagWindow(QWidget):
         self._result: dict | None = None
 
         self.setWindowTitle("设备诊断")
-        self.setMinimumSize(430, 420)
-        self.setObjectName("DiagRoot")
-        self.setStyleSheet(theme.qss())
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        setup_dialog(self, (430, 420))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 14)
@@ -126,7 +125,6 @@ class DiagWindow(QWidget):
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
-        self.bar.setFixedHeight(3)
         self.bar.hide()
         root.addWidget(self.bar)
 
@@ -147,23 +145,7 @@ class DiagWindow(QWidget):
         self.stack.addWidget(page_empty)
         self._page_empty = page_empty
 
-        self.scroll = QScrollArea()
-        self.scroll.setObjectName("DiagScroll")
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QScrollArea.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.viewport().setAutoFillBackground(False)
-        self.scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        holder = QWidget()
-        holder.setObjectName("DiagContent")
-        self.list_lay = QVBoxLayout(holder)
-        self.list_lay.setContentsMargins(0, 0, 4, 0)
-        self.list_lay.setSpacing(2)
-        self.list_lay.addStretch(1)
-        self.scroll.setWidget(holder)
+        self.scroll, self.list_lay = scroll_list(spacing=2)
         self.stack.addWidget(self.scroll)
         self._page_list = self.scroll
 
@@ -248,7 +230,19 @@ class DiagWindow(QWidget):
         self._worker = AutoDiagWorker(self.config, mode=mode)
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
-        self._worker.start()
+        # 线程真正结束后再松手 + 释放。done 信号到达时线程可能还没退完，
+        # 提前把引用丢掉会让 QThread 在运行中被回收（Qt 会直接崩）。
+        # 把 worker 自己传进回调：万一下一轮已经起来了，旧线程收尾时
+        # 不能把新线程的引用一起清掉。
+        worker = self._worker
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        worker.start()
+
+    def _on_worker_finished(self, worker) -> None:
+        if self._worker is worker:
+            self._worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_done(self, result: dict) -> None:
         self._running = False
@@ -269,7 +263,11 @@ class DiagWindow(QWidget):
             self._write_report(result)
             return
         if result.get("mode") == "refresh":
-            # 添加设备后只刷新列表，失败原因还是上一轮的结论
+            # 添加设备后只刷新列表，失败原因还是上一轮的结论。
+            # 这里必须给一句新状态 —— 否则底部会一直停在
+            # "识别中，请勿关闭…"，看起来像卡住了。
+            count = len(result.get("devices") or [])
+            self.status.setText(f"已读到 {count} 台设备" if count else "当前没有读到电量的设备")
             self.rule_changed.emit()
             return
 
@@ -289,16 +287,8 @@ class DiagWindow(QWidget):
         window.exec()
 
     # ---------------- 列表 ----------------
-    def _clear_rows(self) -> None:
-        while self.list_lay.count():
-            item = self.list_lay.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-
     def _render(self) -> None:
-        self._clear_rows()
+        clear_layout(self.list_lay)
         devices = self._devices
         failed = (self._result or {}).get("failed") or []
 
@@ -342,11 +332,6 @@ class DiagWindow(QWidget):
         self._run("report")
 
     def _write_report(self, result: dict) -> None:
-        import platform
-        from datetime import datetime
-
-        from config import config_dir
-
         devices = result.get("devices") or []
         eps = result.get("endpoints_list") or []
         lines: list[str] = [
@@ -389,7 +374,7 @@ class DiagWindow(QWidget):
                 f"接口={ep['interface']}")
 
         debug = result.get("logs") or self._debug
-        lines += ["", f"【五、扫描日志】共 {len(debug)} 行"]
+        lines += ["", f"【四、扫描日志】共 {len(debug)} 行"]
         lines.extend(debug or ["（无）"])
         lines += ["", "=" * 46, "请把本文件整份发回，内容越多越好，不要删减。"]
 

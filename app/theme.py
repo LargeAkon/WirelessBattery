@@ -6,6 +6,14 @@
 1. 只有墨与纸两种极端，不引入任何彩色；层级靠灰度、字号与留白表达。
 2. 不做"框中框"：卡片是一整块面，设备之间只用发丝线分隔，不画独立小卡片。
 3. 数字是主角：电量百分比大号、加粗、对齐；说明性文字一律删掉。
+
+样式表的组织
+------------
+`qss()` 由三段拼成，从广到窄，便于单独定位问题：
+    基础段  卡片本体、标题、选项、发丝线、tooltip
+    弹窗段  诊断页 / 添加设备：行、输入控件、滚动条、滚动区、消息框
+    菜单段  托盘右键菜单
+所有颜色都来自当前 _PALETTES，切主题后重新调用 qss() 即可整体换肤。
 """
 from __future__ import annotations
 
@@ -17,8 +25,6 @@ _PALETTES = {
     "dark": {
         "BG":            "#0D0E10",
         "BG_SOFT":       "#16171A",
-        "BG_ROW":        "#16171A",
-        "BG_ROW_HOVER":  "#1D1F22",
         "STROKE":        "rgba(255,255,255,0.075)",
         "STROKE_STRONG": "rgba(255,255,255,0.16)",
         "TEXT":          "#F4F5F7",
@@ -44,8 +50,6 @@ _PALETTES = {
     "light": {
         "BG":            "#FFFFFF",
         "BG_SOFT":       "#F5F5F7",
-        "BG_ROW":        "#F5F5F7",
-        "BG_ROW_HOVER":  "#EFEFF2",
         "STROKE":        "rgba(0,0,0,0.11)",
         "STROKE_STRONG": "rgba(0,0,0,0.24)",
         "TEXT":          "#0A0B0C",
@@ -75,13 +79,13 @@ _PALETTES = {
 
 _mode = "dark"
 
-# 兼容既有引用的别名（全部落到单色体系）
-BG = BG_SOFT = BG_ROW = BG_ROW_HOVER = ""
+# 模块级颜色的占位：`from theme import TEXT` 这类引用在 _apply 之前也必须能导入。
+# 真正的值由 _apply 从 _PALETTES 写进来。
+BG = BG_SOFT = ""
 STROKE = STROKE_STRONG = ""
 TEXT = TEXT_SUB = TEXT_DIM = ""
 INK = ON_INK = INK_SOFT = TRACK = HOVER = ""
-CARD_FILL = CARD_STROKE = ""
-ACCENT = ACCENT_SOFT = OK = WARN = CRIT = ""
+CARD_FILL = CARD_STROKE = CHIP_BG = ""
 CHARGE = CHARGE_DEEP = CHARGE_TRACK = CHARGE_BOLT = ""
 
 FONT = "Microsoft YaHei UI"
@@ -97,15 +101,7 @@ def _apply(mode: str) -> None:
     if mode not in _PALETTES:
         mode = "dark"
     _mode = mode
-    palette = _PALETTES[mode]
-    g = globals()
-    g.update(palette)
-    # 单色体系下的语义别名
-    g["ACCENT"] = palette["INK"]
-    g["ACCENT_SOFT"] = palette["INK_SOFT"]
-    g["OK"] = palette["TEXT"]
-    g["WARN"] = palette["TEXT_SUB"]
-    g["CRIT"] = palette["TEXT"]
+    globals().update(_PALETTES[mode])
 
 
 def set_mode(mode: str) -> str:
@@ -123,15 +119,14 @@ TRAY_INK = "#0A0B0C"
 TRAY_CHARGE = "#0E9C4A"
 
 
-def tray_icon_color(taskbar_light: bool | None = None) -> str:
-    """托盘图标墨色：固定深黑（参数仅为兼容旧调用）。"""
+def tray_icon_color() -> str:
+    """托盘图标墨色：固定深黑。"""
     return TRAY_INK
 
 
-def tray_charge_color(taskbar_light: bool | None = None) -> str:
-    """充电态流动段的绿色：固定深绿（参数仅为兼容旧调用）。"""
+def tray_charge_color() -> str:
+    """充电态流动段的绿色：固定深绿。"""
     return TRAY_CHARGE
-
 
 
 def color(css: str):
@@ -191,13 +186,9 @@ def charge_bolt_color():
     return color(CHARGE_BOLT)
 
 
-def level_color(pct: float) -> str:
-    """单色体系：电量高低不做变色，靠数值与进度条长度表达。"""
-    return TEXT
-
-
-def qss() -> str:
-    """卡片主体样式表。"""
+# ---------------- 样式表 ----------------
+def _base_qss() -> str:
+    """卡片本体：标题、设备名、百分比、选项、发丝线。"""
     return f"""
     QWidget {{
         color: {TEXT};
@@ -222,17 +213,6 @@ def qss() -> str:
         font-size: 13px;
         font-weight: 600;
         color: {TEXT};
-    }}
-    #Pct {{
-        font-family: "{FONT_NUM}", "{FONT}";
-        font-size: 19px;
-        font-weight: 700;
-        color: {TEXT};
-    }}
-    #PctUnit {{
-        font-size: 11px;
-        font-weight: 600;
-        color: {TEXT_SUB};
     }}
     #SectionLabel {{
         font-size: 12px;
@@ -281,11 +261,6 @@ def qss() -> str:
         color: {TEXT};
         background: {HOVER};
     }}
-    QFrame#Hairline {{
-        background: {STROKE};
-        border: none;
-        max-height: 1px;
-    }}
     QToolTip {{
         background: {BG_SOFT};
         color: {TEXT};
@@ -295,11 +270,16 @@ def qss() -> str:
         font-family: "{FONT}";
         font-size: 11px;
     }}
+    """
 
-    /* ---- 独立窗口（诊断页）----
-       只用 objectName 限定背景，不用 QWidget 通配：
-       通配会把 QLineEdit / QGroupBox / 表格 viewport 一起刷成窗口底色，
-       边框和层级全糊掉。 */
+
+def _dialog_qss() -> str:
+    """独立窗口（诊断页 / 添加设备）：行、表单、滚动条、弹窗。
+
+    只用 objectName 限定背景，不用 QWidget 通配：
+    通配会把输入框和滚动区一起刷成窗口底色，边框和层级全糊掉。
+    """
+    return f"""
     #DiagRoot {{
         background: {BG};
     }}
@@ -308,22 +288,8 @@ def qss() -> str:
         font-weight: 700;
         color: {TEXT};
     }}
-    #DiagTip {{
-        font-size: 12px;
-        color: {TEXT_SUB};
-    }}
-    #DiagLog {{
-        font-family: Consolas, monospace;
-        font-size: 11px;
-        color: {TEXT_SUB};
-        padding: 6px;
-    }}
     #DiagStatus {{
         font-size: 12px;
-        color: {TEXT_SUB};
-    }}
-    #DiagStep {{
-        font-size: 13px;
         color: {TEXT_SUB};
     }}
     /* 诊断结果 / 接收器列表的一行：无框、无表头，靠留白分开 */
@@ -408,25 +374,8 @@ def qss() -> str:
         border-radius: 2px;
         background: {INK};
     }}
-    QGroupBox {{
-        border: 1px solid {STROKE};
-        border-radius: 10px;
-        margin-top: 12px;
-        padding: 14px 10px 10px 10px;
-        font-size: 11px;
-        font-weight: 600;
-        color: {TEXT_SUB};
-    }}
-    QGroupBox::title {{
-        subcontrol-origin: margin;
-        subcontrol-position: top left;
-        left: 10px;
-        padding: 0 4px;
-        color: {TEXT_SUB};
-    }}
-
     /* 输入控件必须有明确底色，否则就是"系统白底 + 主题白字"= 白底白字 */
-    QLineEdit, QComboBox, QSpinBox {{
+    QLineEdit, QComboBox {{
         background: {BG_SOFT};
         border: 1px solid {STROKE};
         border-radius: 8px;
@@ -436,7 +385,7 @@ def qss() -> str:
         selection-background-color: {INK};
         selection-color: {ON_INK};
     }}
-    QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+    QLineEdit:focus, QComboBox:focus {{
         border: 1px solid {STROKE_STRONG};
     }}
     QLineEdit:disabled, QComboBox:disabled {{
@@ -454,49 +403,15 @@ def qss() -> str:
         selection-background-color: {HOVER};
         selection-color: {TEXT};
     }}
-    QTextEdit {{
-        background: {BG_SOFT};
-        border: 1px solid {STROKE};
-        border-radius: 10px;
-        color: {TEXT_SUB};
-        selection-background-color: {INK};
-        selection-color: {ON_INK};
-    }}
 
-    QTableWidget {{
-        background: {BG_SOFT};
-        alternate-background-color: {BG_SOFT};
-        border: 1px solid {STROKE};
-        border-radius: 10px;
-        gridline-color: transparent;
-    }}
-    QTableWidget::item {{
-        padding: 5px 8px;
-        color: {TEXT};
+    /* 列表容器本身就是窗口底色，滚动区只负责滚动 —— 不画自己的框和底色 */
+    QScrollArea {{
+        background: transparent;
         border: none;
     }}
-    QTableWidget::item:selected {{
-        background: {BG_ROW_HOVER};
-        color: {TEXT};
+    QScrollArea > QWidget > QWidget {{
+        background: transparent;
     }}
-    QHeaderView {{
-        background: {BG_SOFT};
-        border: none;
-    }}
-    QHeaderView::section {{
-        background: {BG_SOFT};
-        color: {TEXT_SUB};
-        border: none;
-        border-bottom: 1px solid {STROKE};
-        padding: 6px 8px;
-        font-size: 11px;
-        font-weight: 600;
-    }}
-    QTableCornerButton::section {{
-        background: {BG_SOFT};
-        border: none;
-    }}
-
     QScrollBar:vertical {{
         background: transparent;
         width: 10px;
@@ -550,6 +465,39 @@ def qss() -> str:
         background: {HOVER};
     }}
     """
+
+
+def _menu_qss() -> str:
+    """托盘右键菜单。以前单独 setStyleSheet 到菜单对象上，现在并入全局，
+    换肤时随 app.setStyleSheet 一次刷新，不必再手动同步第二份样式。"""
+    return f"""
+    QMenu {{
+        background: {BG_SOFT};
+        color: {TEXT};
+        border: 1px solid {STROKE_STRONG};
+        border-radius: 10px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        padding: 7px 22px 7px 14px;
+        border-radius: 6px;
+        font-size: 12px;
+    }}
+    QMenu::item:selected {{
+        background: {INK_SOFT};
+        color: {TEXT};
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {STROKE};
+        margin: 5px 8px;
+    }}
+    """
+
+
+def qss() -> str:
+    """完整样式表：基础 + 弹窗 + 菜单。"""
+    return _base_qss() + _dialog_qss() + _menu_qss()
 
 
 _apply("dark")

@@ -22,6 +22,8 @@ from PySide6.QtCore import QObject, QRect, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
+from ui.card import tray_rect_ok
+
 POLL_MS = 120          # 8 次/秒：够快，又不至于让 CPU 常驻
 LEAVE_MS = 260         # 离开后延迟收起，跨过图标与卡片之间的缝隙
 REOPEN_MS = 450        # 刚收起这么短时间内不再自动弹出（连着点图标时防抖）
@@ -74,8 +76,11 @@ class TrayHover(QObject):
     # ---------------- 轮询 ----------------
     def _refresh_rect(self) -> None:
         rect = self.tray.geometry()
-        ok = (not rect.isNull()) and rect.width() > 0 and rect.height() > 0
-        self._rect = rect if ok else QRect()
+        # 只认"一枚图标"大小的矩形。有的系统在全屏应用前台 / 切分辨率之后
+        # 会把整条任务栏或通知区域丢回来，宽高几百像素；拿它当悬停热区，
+        # 鼠标扫过任务栏就会弹卡片，落位也会跑到屏幕中间。
+        ok = tray_rect_ok(rect)
+        self._rect = QRect(rect) if ok else QRect()
         if ok != self._supported:
             self._supported = ok
             self.supported_changed.emit(ok)
@@ -105,7 +110,7 @@ class TrayHover(QObject):
             return
         # 只自动收起"悬停弹出的"那种；点开的卡片仍按原来的失焦逻辑走，
         # 否则从菜单打开设置时，鼠标一离开就被关掉了
-        if getattr(self.card, "_hover_shown", False) and not self._leave.isActive():
+        if self.card._hover_shown and not self._leave.isActive():
             self._leave.start()
 
     def _openable(self) -> bool:
@@ -116,8 +121,9 @@ class TrayHover(QObject):
             return False
         if QApplication.activePopupWidget() is not None:
             return False
-        stamp = max(getattr(self.card, "_hide_stamp", 0.0), self._last_hide)
-        return (time.monotonic() - stamp) > (REOPEN_MS / 1000.0)
+        if self.card.hidden_recently(REOPEN_MS / 1000.0):
+            return False
+        return (time.monotonic() - self._last_hide) > (REOPEN_MS / 1000.0)
 
     def _over_card(self, pos) -> bool:
         if not self.card.isVisible():
@@ -127,6 +133,11 @@ class TrayHover(QObject):
 
     def _maybe_hide(self) -> None:
         if not self.card.isVisible():
+            return
+        # 换肤/毛玻璃的圆形揭开还没播完：这会儿收起来，动效等于被剪掉。
+        # 等下一轮再判断。
+        if self.card.reveal_active():
+            self._leave.start()
             return
         pos = QCursor.pos()
         if self._over_card(pos) or self._rect.contains(pos):

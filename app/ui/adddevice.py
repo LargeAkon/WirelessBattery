@@ -18,13 +18,12 @@ import threading
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QPushButton, QVBoxLayout,
 )
 
 import autodiag
 import profiles
-import theme
-from ui.rows import PickRow
+from ui.rows import PickRow, clear_layout, scroll_list, setup_dialog
 
 
 class _Worker(QThread):
@@ -77,10 +76,7 @@ class AddDeviceWindow(QDialog):
         self._tried: set[str] = set()
 
         self.setWindowTitle("添加设备")
-        self.setObjectName("DiagRoot")
-        self.setStyleSheet(theme.qss())
-        self.setMinimumSize(480, 440)
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        setup_dialog(self, (480, 440))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 14)
@@ -91,21 +87,7 @@ class AddDeviceWindow(QDialog):
         root.addWidget(title)
 
         # ---------- 接收器列表（一行一台，点一下选中） ----------
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QScrollArea.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.viewport().setAutoFillBackground(False)
-        self.scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        holder = QWidget()
-        self.list_lay = QVBoxLayout(holder)
-        self.list_lay.setContentsMargins(0, 0, 4, 0)
-        self.list_lay.setSpacing(4)
-        self.list_lay.addStretch(1)
-        self.scroll.setWidget(holder)
+        self.scroll, self.list_lay = scroll_list(spacing=4)
         root.addWidget(self.scroll, 1)
 
         # ---------- 型号 ----------
@@ -164,13 +146,31 @@ class AddDeviceWindow(QDialog):
 
     # ---------------- 数据 ----------------
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802
-        if obj is self.combo.lineEdit():
-            if ev.type() == QEvent.FocusIn:
-                # 全选要在下一个事件循环做：焦点事件本身还会重设光标位置
-                QTimer.singleShot(0, obj.selectAll)
-            elif ev.type() == QEvent.MouseButtonPress:
-                QTimer.singleShot(0, self.combo.showPopup)
+        # 窗口关闭 / 解释器退出时，Qt 仍可能把排队的事件送到这里，
+        # 此时输入框的 C++ 对象已经销毁，访问它就抛 RuntimeError。
+        try:
+            line = self.combo.lineEdit()
+            if obj is line:
+                if ev.type() == QEvent.FocusIn:
+                    # 全选要在下一个事件循环做：焦点事件本身还会重设光标位置
+                    QTimer.singleShot(0, self._select_all)
+                elif ev.type() == QEvent.MouseButtonPress:
+                    QTimer.singleShot(0, self._popup)
+        except RuntimeError:
+            return False
         return super().eventFilter(obj, ev)
+
+    def _select_all(self) -> None:
+        try:
+            self.combo.lineEdit().selectAll()
+        except RuntimeError:
+            pass
+
+    def _popup(self) -> None:
+        try:
+            self.combo.showPopup()
+        except RuntimeError:
+            pass
 
     def _on_combo_typed(self, _text: str) -> None:
         # 用户开始打字了：完整列表让位给搜索补全，两个浮层别叠在一起
@@ -195,12 +195,7 @@ class AddDeviceWindow(QDialog):
         self.combo.setCompleter(completer)
 
     def _clear_rows(self) -> None:
-        while self.list_lay.count():
-            item = self.list_lay.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+        clear_layout(self.list_lay)
         self._rows = []
 
     def reload(self) -> None:
@@ -233,7 +228,14 @@ class AddDeviceWindow(QDialog):
         for i, row in enumerate(self._rows):
             row.set_picked(i == index)
         self._tried.clear()
-        # 换了台接收器，自动探测从零开始，按钮也放开
+        # 换了台接收器，上一台的试读结果必须作废。留着它会带来两个错：
+        # 「添加设备」仍然可点（结果还是 ok），点下去写的是上一台的型号；
+        # 名称框里也还挂着上一台的名字。
+        self._result = None
+        self.add_btn.setEnabled(False)
+        self.name_edit.clear()
+        self.tip.setText("")
+        # 自动探测从零开始，按钮也放开
         self.probe_btn.setEnabled(True)
         self.probe_btn.setToolTip("")
         receiver = self._receivers[index]
@@ -281,11 +283,21 @@ class AddDeviceWindow(QDialog):
         self._result = None
         self.add_btn.setEnabled(False)
         self._set_busy(True, "正在探测…" if job == "probe" else "正在读取…")
-        self._worker = _Worker(job, receiver, profile_id,
-                               self._tried if job == "probe" else None, self)
-        self._worker.progress.connect(lambda text: self.tip.setText(text))
-        self._worker.done.connect(self._on_done)
-        self._worker.start()
+        worker = _Worker(job, receiver, profile_id,
+                         self._tried if job == "probe" else None, self)
+        worker.progress.connect(lambda text: self.tip.setText(text))
+        worker.done.connect(self._on_done)
+        # 线程真正退完再松手：done 到达时 isRunning() 仍可能为 True，
+        # 这时候清引用会让"再来一次"的按钮判定失真。
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self, worker) -> None:
+        if self._worker is worker:
+            self._worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_done(self, result: dict) -> None:
         self._result = result
@@ -345,6 +357,8 @@ class AddDeviceWindow(QDialog):
         # 加完就把它从"待添加"里去掉，列表不该还挂着刚加过的那台
         self._known.add(receiver["vid_pid"].upper())
         self.reload()
+        # reload 会重选第一台并清空提示，这里把"已添加"补回去
+        self.tip.setText(f"已添加 · {label}")
 
     # ---------------- 关闭 ----------------
     def closeEvent(self, event) -> None:  # noqa: N802

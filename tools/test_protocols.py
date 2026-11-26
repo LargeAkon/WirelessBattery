@@ -8,7 +8,7 @@ from pathlib import Path
 APP = Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP))
 
-from model import Device, KEYBOARD, MOUSE  # noqa: E402
+from model import Device, MOUSE  # noqa: E402
 from providers import proto, raw_hid  # noqa: E402
 from providers.hid_desc import extract_bits, parse_battery_fields, to_percent  # noqa: E402
 from scanner import Scanner  # noqa: E402
@@ -131,6 +131,20 @@ def test_hyperx() -> None:
     kingston = bytes([0x0B, 0x00, 0xBB, 0x02, 0, 0, 0, 55])
     _check("kingston", proto.parse_hyperx_kingston_battery(kingston) == 55.0)
 
+    # 接收器货号表：05B7 / 0C9D / 0FCC 都是 Cloud III（飓风 3）。
+    # 0FCC 曾经漏掉，那批接收器在软件里完全看不到。
+    from providers import hyperx
+    for pid in (0x05B7, 0x0C9D, 0x0FCC):
+        _check(f"cloud iii pid {pid:04X}", hyperx._family(0x03F0, pid) == "iii")
+    _check("cloud iii s pid", hyperx._family(0x03F0, 0x02CC) == "iiis")
+    _check("unknown pid", hyperx._family(0x03F0, 0xFFFF) is None)
+
+    # 帧长度两种口径都要发：64 / 65。少一个字节，只认 65 的接收器整帧丢弃。
+    frames = hyperx._frames(bytes([0x66, 0x89]) + bytes(62))
+    _check("hyperx frame len 64", len(frames[0]) == 64)
+    _check("hyperx frame len 65", len(frames[1]) == 65)
+    _check("hyperx frame same head", frames[1][:2] == b"\x66\x89")
+
 
 def test_brand_frames() -> None:
     n54 = bytes([0x08, 0x72, 0x00, 0x3A, 0x00, 0x07, 0x01, 100, 0x16, 0x11])
@@ -179,6 +193,28 @@ def test_descriptor() -> None:
     _check("bits", to_percent(value, 100) == 42.0)
     _check("coarse", to_percent(5, 7) == 71.0)
     _check("wide scale", to_percent(255, 255) == 100.0)
+
+
+def test_report_lengths() -> None:
+    """描述符里每个 report ID 的长度必须各自从 0 算起。
+
+    设备常把 64 字节的长报文和 32 字节的短报文分两个 ID 声明。
+    早期实现把两个 ID 的位数累加，第二个 ID 的长度被算成 97 字节，
+    io_lengths 的最大值偏大，靠长度认型号的协议就永远匹配不上。
+    """
+    from providers.hidreports import _parse
+
+    desc = bytes([
+        0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+        0x85, 0x01, 0x75, 0x08, 0x95, 0x40, 0x81, 0x02,   # report 1: 64 字节输入
+        0xC0,
+        0x06, 0x00, 0xFF, 0x09, 0x02, 0xA1, 0x01,
+        0x85, 0x02, 0x75, 0x08, 0x95, 0x20, 0x81, 0x02,   # report 2: 32 字节输入
+        0xC0,
+    ])
+    lengths = _parse(desc)["in"]
+    _check("report 1 length", lengths.get(1) == 65)
+    _check("report 2 length", lengths.get(2) == 33)
 
 
 def test_endpoints() -> None:
@@ -254,6 +290,13 @@ def test_input_guard() -> None:
         base._FAIL.pop(key, None)
         base.mark_fail(key)
         _check("让位不进冷却", key not in base._FAIL)
+        # 让位标记是一次性的：同一轮里后面真正失败的设备仍要进冷却，
+        # 否则那台设备每轮都被重新白等一遍超时。
+        other = ("guard-test-2",)
+        base._FAIL.pop(other, None)
+        base.mark_fail(other)
+        _check("让位标记只消费一次", other in base._FAIL)
+        base._FAIL.pop(other, None)
 
         # 用户停手后必须正常放行
         inputidle.idle_seconds = lambda: 5.0
@@ -308,6 +351,7 @@ if __name__ == "__main__":
     test_hyperx()
     test_brand_frames()
     test_descriptor()
+    test_report_lengths()
     test_endpoints()
     test_merge()
     test_input_guard()

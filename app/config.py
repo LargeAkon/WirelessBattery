@@ -21,7 +21,6 @@ DEFAULTS = {
     "theme": "dark",            # dark / light
     "glass": True,              # 卡片毛玻璃（关掉就是实底卡片）
     "overrides": {},            # 设备 key -> {"kind":..., "name":...}
-    "card_pinned": False,
 }
 
 

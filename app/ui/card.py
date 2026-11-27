@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import ctypes
+import sys
 import time
 
 from PySide6.QtCore import (
@@ -14,7 +16,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QApplication, QButtonGroup, QHBoxLayout, QLabel,
     QVBoxLayout, QWidget,
 )
 
@@ -24,7 +26,7 @@ from model import Device
 from ui.glass import ScreenBlur
 from ui.glasscard import GlassCard
 from ui.reveal import RevealOverlay
-from ui.widgets import DeviceRow, IconButton, ToggleSwitch
+from ui.widgets import ChipButton, DeviceRow, GhostButton, IconButton, ToggleSwitch, style_label
 
 CARD_WIDTH = 344
 CARD_PAD = 18
@@ -78,9 +80,26 @@ def tray_rect_ok(rect: QRect | None) -> bool:
 
 def _windows_api():
     """user32 / kernel32。延迟导入，模块加载时不碰 Win32。"""
-    import ctypes
-
     return ctypes.windll.user32, ctypes.windll.kernel32
+
+
+# 换肤会重刷顶层窗口样式。Windows 11 趁机把标题栏补回去：最小化、最大化、关闭。
+# 卡片无边框且客户区全透明，屏幕上就只剩这三个图标；这次重刷还常把窗口
+# 丢到屏幕正中（和 WM_DPICHANGED 的"建议矩形"是同一类落位）。
+_CAPTION_MASK = (
+    0x00C00000  # WS_CAPTION
+    | 0x00040000  # WS_THICKFRAME
+    | 0x00080000  # WS_SYSMENU
+    | 0x00020000  # WS_MINIMIZEBOX
+    | 0x00010000  # WS_MAXIMIZEBOX
+)
+_WM_STYLECHANGING = 0x007C
+_WM_NCCALCSIZE = 0x0083
+_GWL_STYLE_WPARAM = 0xFFFFFFF0  # (DWORD)GWL_STYLE
+
+
+class _STYLESTRUCT(ctypes.Structure):
+    _fields_ = (("styleOld", ctypes.c_uint), ("styleNew", ctypes.c_uint))
 
 
 class CardWindow(QWidget):
@@ -126,14 +145,16 @@ class CardWindow(QWidget):
         # 最后一次"人在卡片里动手"的时刻（换肤/毛玻璃动效的起手）。
         # 见 _confirm_deactivate：这之后的一小段时间里不许自动收起。
         self._interact_stamp = 0.0
+        # (控件, 文字角色)。换肤只改字体和调色板，绝不 setStyleSheet。
+        self._themed_labels: list[tuple[QLabel, str]] = []
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
             | Qt.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setWindowTitle("外设电量")
-        self.setStyleSheet(theme.qss())
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -270,6 +291,7 @@ class CardWindow(QWidget):
         # 多台时也没人靠它认设备。标题只留给设置页做页面名。
         self.header_label = QLabel("")
         self.header_label.setObjectName("HeaderLabel")
+        self._bind_label(self.header_label, "header")
         self.header_label.setVisible(False)
         row.addWidget(self.header_label, 0, Qt.AlignVCenter)
         row.addStretch(1)
@@ -299,6 +321,7 @@ class CardWindow(QWidget):
 
         self.empty_label = QLabel("正在读取…")
         self.empty_label.setObjectName("Empty")
+        self._bind_label(self.empty_label, "empty")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
         self.empty_label.setMinimumHeight(44)
@@ -312,7 +335,7 @@ class CardWindow(QWidget):
         lay.setContentsMargins(0, 6, 0, 0)
         lay.setSpacing(12)
 
-        self._chips: dict[int, QPushButton] = {}
+        self._chips: dict[int, ChipButton] = {}
         self._interval_group = QButtonGroup(page)
         self._interval_group.setExclusive(True)
         block, self.interval_note = self._chip_block(
@@ -322,7 +345,7 @@ class CardWindow(QWidget):
         )
         lay.addLayout(block)
 
-        self._theme_chips: dict[str, QPushButton] = {}
+        self._theme_chips: dict[str, ChipButton] = {}
         self._theme_group = QButtonGroup(page)
         self._theme_group.setExclusive(True)
         block, _ = self._chip_block(
@@ -341,10 +364,7 @@ class CardWindow(QWidget):
             self._on_autostart,
         )
 
-        self.diag_btn = QPushButton("设备诊断")
-        self.diag_btn.setObjectName("Ghost")
-        self.diag_btn.setFixedHeight(22)
-        self.diag_btn.setCursor(Qt.PointingHandCursor)
+        self.diag_btn = GhostButton("设备诊断")
         self.diag_btn.clicked.connect(self.diag_requested.emit)
         lay.addWidget(self.diag_btn)
 
@@ -363,11 +383,13 @@ class CardWindow(QWidget):
         head.setContentsMargins(0, 0, 0, 0)
         label = QLabel(label_text)
         label.setObjectName("SectionLabel")
+        self._bind_label(label, "section")
         head.addWidget(label, 0, Qt.AlignVCenter)
         note_label = None
         if note is not None:
             note_label = QLabel(note)
             note_label.setObjectName("SectionNote")
+            self._bind_label(note_label, "note")
             head.addWidget(note_label, 0, Qt.AlignVCenter)
         head.addStretch(1)
         block.addLayout(head)
@@ -375,12 +397,7 @@ class CardWindow(QWidget):
         row = QHBoxLayout()
         row.setSpacing(6)
         for value, text in options:
-            btn = QPushButton(text)
-            btn.setObjectName("Chip")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(28)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn = ChipButton(text)
             btn.clicked.connect(lambda _=False, v=value: handler(v))
             if group is not None:
                 group.addButton(btn)
@@ -395,6 +412,7 @@ class CardWindow(QWidget):
         row.setContentsMargins(0, 1, 0, 0)
         t = QLabel(title)
         t.setObjectName("SwitchLabel")
+        self._bind_label(t, "switch")
         row.addWidget(t, 1, Qt.AlignVCenter)
         switch = ToggleSwitch(checked)
         switch.toggled.connect(handler)
@@ -542,6 +560,96 @@ class CardWindow(QWidget):
             outer.activate()
         self.adjustSize()
 
+    # ---------------- 无边框 ----------------
+    def showEvent(self, ev) -> None:  # noqa: N802
+        super().showEvent(ev)
+        self._suppress_native_caption()
+
+    def nativeEvent(self, eventType, message):  # noqa: N802
+        """换肤重刷样式时，不许 Windows 把标题栏按钮装回来。
+
+        客户区保持整窗大小，标题栏没有可画的位置；样式正在改的那一下
+        也把最小化、最大化、关闭这几位清掉。诊断窗口是普通窗口，不走这里。
+        """
+        if sys.platform == "win32" and message:
+            try:
+                name = bytes(eventType)
+            except Exception:
+                name = b""
+            if name == b"windows_generic_MSG":
+                try:
+                    msg = ctypes.wintypes.MSG.from_address(int(message))
+                    if msg.message == _WM_NCCALCSIZE and msg.wParam:
+                        return True, 0
+                    if (
+                        msg.message == _WM_STYLECHANGING
+                        and (int(msg.wParam) & 0xFFFFFFFF) == _GWL_STYLE_WPARAM
+                        and msg.lParam
+                    ):
+                        bits = ctypes.sizeof(ctypes.c_void_p) * 8
+                        addr = int(msg.lParam) & ((1 << bits) - 1)
+                        style = _STYLESTRUCT.from_address(addr)
+                        style.styleNew = (int(style.styleNew) & ~_CAPTION_MASK) & 0xFFFFFFFF
+                except Exception:
+                    pass
+        return super().nativeEvent(eventType, message)
+
+    def _suppress_native_caption(self) -> None:
+        """摘掉已经补上的标题栏，并让 DWM 不要再画非客户区。"""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+        if not hwnd:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            if ctypes.sizeof(ctypes.c_void_p) == 8:
+                get_long = user32.GetWindowLongPtrW
+                set_long = user32.SetWindowLongPtrW
+                get_long.restype = ctypes.c_ssize_t
+                set_long.restype = ctypes.c_ssize_t
+                long_type = ctypes.c_ssize_t
+            else:
+                get_long = user32.GetWindowLongW
+                set_long = user32.SetWindowLongW
+                get_long.restype = ctypes.c_long
+                set_long.restype = ctypes.c_long
+                long_type = ctypes.c_long
+            get_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            set_long.argtypes = [ctypes.c_void_p, ctypes.c_int, long_type]
+            style = int(get_long(hwnd, -16)) & 0xFFFFFFFF
+            cleared = style & ~_CAPTION_MASK
+            if cleared != style:
+                set_long(hwnd, -16, cleared)
+                user32.SetWindowPos.argtypes = [
+                    ctypes.c_void_p, ctypes.c_void_p,
+                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                    ctypes.c_uint,
+                ]
+                user32.SetWindowPos.restype = ctypes.c_int
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020,
+                )
+            policy = ctypes.c_int(1)  # DWMNCRP_DISABLED
+            dwmapi = ctypes.windll.dwmapi
+            dwmapi.DwmSetWindowAttribute.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
+            ]
+            dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+            dwmapi.DwmSetWindowAttribute(
+                hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy),
+            )
+        except Exception:
+            pass
+
+    def _bind_label(self, label: QLabel, role: str) -> None:
+        style_label(label, role)
+        self._themed_labels.append((label, role))
+
     # ---------------- 主题 ----------------
     def apply_theme(self) -> None:
         """全局换肤后刷新自身与所有子控件。
@@ -554,13 +662,24 @@ class CardWindow(QWidget):
         冻住的旧皮肤，收不收得掉只能等看门狗，观感等于"点了没反应"。
         """
         try:
-            self.setStyleSheet(theme.qss())
+            # 卡片从创建起就没有样式表。换肤只改调色板并重绘。
+            # 设备行是窗口显示之后才加进来的；这时若再 setStyleSheet，
+            # Qt 会把这些行收成独立窗口，于是屏幕左上角和正中出现
+            # 最小化、最大化、关闭。没设备时没有这些行，所以不会出现。
+            for label, role in self._themed_labels:
+                style_label(label, role)
+            self.diag_btn.update()
+            self._suppress_native_caption()
             self._sync_theme_chips()
+            for btn in (*self._chips.values(), *self._theme_chips.values()):
+                btn.update()
             for row in self._rows.values():
-                try:
-                    row.apply(row.device, animate=False)
-                except Exception:
-                    pass
+                row.tile.update()
+                row.bar.update()
+                row.bolt.update()
+                row.pct_label.update()
+                row.name_label.update()
+                row.update()
             self.card.update()
             self.update()
             # 换色不该改尺寸，但真变了（字体回退）就得重排；同时顺手核对
@@ -570,6 +689,8 @@ class CardWindow(QWidget):
             if self.isVisible():
                 self._reposition()
         finally:
+            self._suppress_native_caption()
+            QTimer.singleShot(0, self._suppress_native_caption)
             self._sync_overlay()
             self._finish_reveal()
 
@@ -732,6 +853,7 @@ class CardWindow(QWidget):
         for key in list(self._rows.keys()):
             if key not in keys:
                 row = self._rows.pop(key)
+                row.hide()
                 row.setParent(None)
                 row.deleteLater()
 
@@ -741,7 +863,9 @@ class CardWindow(QWidget):
         for index, device in enumerate(devices):
             row = self._rows.get(device.key)
             if row is None:
-                row = DeviceRow(device, animate=animate)
+                # 先挂到列表页上再构建。不传 parent 的话，构造过程里这行
+                # 是个顶层窗口，一量设备名字宽就会带着标题栏按钮出现在屏幕上。
+                row = DeviceRow(device, animate=animate, parent=self.list_page)
                 self._rows[device.key] = row
             else:
                 row.apply(device, animate=animate)

@@ -12,7 +12,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from PySide6.QtCore import QRect, QTime, QTimer, Qt, QThread, Signal          # noqa: E402
-from PySide6.QtGui import QAction, QCursor, QIcon                             # noqa: E402
+from PySide6.QtGui import QAction, QCursor, QFont, QIcon                       # noqa: E402
 from PySide6.QtWidgets import (                                               # noqa: E402
     QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 )
@@ -73,9 +73,12 @@ class TrayApp:
         self._tray_frame = 0
         self._tray_key: tuple | None = None
 
-        # 配色先落地，后续所有控件都按当前主题构建
+        # 配色先落地。不给 QApplication 套样式表：卡片是无边框透明窗口，
+        # 全局样式一换就会把后来加进来的设备行收成带标题栏的窗口。
         theme.set_mode(str(self.config.get("theme") or "dark"))
-        app.setStyleSheet(theme.qss())
+        app_font = QFont(theme.FONT)
+        app_font.setPixelSize(12)
+        app.setFont(app_font)
 
         # 自启以配置为准，启动时纠正注册表（安装时未勾选就该是关闭）
         real = apply_autostart_preference(bool(self.config.get("autostart")))
@@ -85,6 +88,7 @@ class TrayApp:
         self.tray = QSystemTrayIcon(self._tray_icon(None))
         self.tray.setToolTip("外设电量 · 正在读取…")
         self.menu = self._build_menu()
+        self.menu.setStyleSheet(theme.menu_qss())
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
@@ -332,9 +336,15 @@ class TrayApp:
 
     def _on_theme_changed(self, mode: str) -> None:
         theme.set_mode(mode)
-        self.app.setStyleSheet(theme.qss())
+        # 不能再 app.setStyleSheet。Qt 会把整棵控件树重刷一遍，藏在列表页里的
+        # 设备行会被收成带最小化、最大化、关闭的窗口，落在屏幕左上角和正中。
+        # 没检测到设备时没有这些行，所以只有这种情况才会出现。
+        # 菜单自己换样式；卡片只换设置页，不碰设备行。
+        self.menu.setStyleSheet(theme.menu_qss())
         self.card.apply_theme()
-        # 托盘图标配色已固定（不随深浅主题变化），这里不用重建图标
+        # 托盘图标配色已固定（不随深浅主题变化），这里不用重建图标。
+        # 诊断页关过之后对象还在。这里仍然通知它换肤，但由它自己保证
+        # 关着的窗口不会被重新显示。
         if self._diag:
             self._diag.apply_theme()
 

@@ -9,11 +9,11 @@ from PySide6.QtCore import (
     Property, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen,
+    QColor, QFont, QFontMetrics, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPalette, QPen,
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractButton, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 import theme
@@ -450,30 +450,167 @@ class IconButton(QAbstractButton):
         p.end()
 
 
+class ChipButton(QAbstractButton):
+    """设置页选项。外观跟原来的样式表一致，但自己画，换肤时不碰样式表。
+
+    无边框透明卡片上，运行时 setStyleSheet 会把「窗口出现之后才加进来的设备行」
+    收成带最小化、最大化、关闭的独立窗口。选项颜色改由绘制时读取主题。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._hover = False
+        self._font = QFont(theme.FONT)
+        self._font.setPixelSize(12)
+        self._font_on = QFont(self._font)
+        self._font_on.setWeight(QFont.Weight.DemiBold)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        if self.isChecked():
+            fill, border, ink, font = theme.INK, theme.INK, theme.ON_INK, self._font_on
+        elif self._hover:
+            fill, border, ink, font = theme.CHIP_BG, theme.STROKE_STRONG, theme.TEXT, self._font
+        else:
+            fill, border, ink, font = theme.CHIP_BG, theme.STROKE, theme.TEXT, self._font
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        pen = QPen(theme.color(border))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.setBrush(theme.color(fill))
+        p.drawRoundedRect(rect, 8, 8)
+        p.setFont(font)
+        p.setPen(theme.color(ink))
+        p.drawText(self.rect().adjusted(0, 3, 0, -3), Qt.AlignCenter, self.text())
+        p.end()
+
+
+class GhostButton(QAbstractButton):
+    """「设备诊断」这种无边文字按钮，对应原来的 QPushButton#Ghost。"""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(22)
+        self._hover = False
+        self._font = QFont(theme.FONT)
+        self._font.setPixelSize(12)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        if self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(theme.hover_color())
+            p.drawRoundedRect(QRectF(self.rect()), 8, 8)
+        p.setFont(self._font)
+        p.setPen(theme.color(theme.TEXT))
+        p.drawText(self.rect().adjusted(2, 0, -2, 0), Qt.AlignLeft | Qt.AlignVCenter, self.text())
+        p.end()
+
+
+# 卡片上的文字。像素字号、字重、字距与原来样式表里的选择器一致。
+_LABEL_LOOK = {
+    "header": (12, QFont.Weight.DemiBold, "TEXT", 0.4),
+    "empty": (13, QFont.Weight.Normal, "TEXT_SUB", 0.0),
+    "section": (12, QFont.Weight.DemiBold, "TEXT", 0.4),
+    "note": (12, QFont.Weight.Normal, "TEXT_SUB", 0.0),
+    "switch": (13, QFont.Weight.Normal, "TEXT", 0.0),
+}
+
+
+def style_label(label: QLabel, role: str) -> None:
+    """用字体和调色板上色，不调用 setStyleSheet。"""
+    px, weight, ink_name, spacing = _LABEL_LOOK[role]
+    font = QFont(theme.FONT)
+    font.setPixelSize(px)
+    font.setWeight(weight)
+    if spacing:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    label.setFont(font)
+    ink = theme.color(getattr(theme, ink_name))
+    pal = label.palette()
+    pal.setColor(QPalette.ColorRole.WindowText, ink)
+    pal.setColor(QPalette.ColorRole.Text, ink)
+    label.setPalette(pal)
+
+
 class ElidedLabel(QLabel):
-    """超长文本自动省略，避免挤压右侧电量。"""
+    """超长文本自动省略，避免挤压右侧电量。
+
+    字是自己画的，不走样式表的 color。换肤若靠 QLabel 的样式重刷，
+    藏着的设备名会被 Qt 收成原生窗口。
+    """
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self._full = text
         self.setMinimumWidth(40)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._apply_name_font("DevName")
+
+    def setObjectName(self, name: str) -> None:  # noqa: N802
+        super().setObjectName(name)
+        self._apply_name_font(name)
+
+    def _apply_name_font(self, name: str) -> None:
+        font = QFont(theme.FONT)
+        if name == "RowSub":
+            font.setPixelSize(11)
+            font.setWeight(QFont.Weight.Normal)
+        else:
+            font.setPixelSize(13)
+            font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
 
     def setText(self, text: str) -> None:  # noqa: N802
         self._full = text
         super().setText(text)
-        self._refresh()
+        self.update()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._refresh()
-
-    def _refresh(self) -> None:
-        metrics = self.fontMetrics()
-        avail = max(10, self.width() - 2)
-        elided = metrics.elidedText(self._full, Qt.ElideRight, avail)
-        if elided != super().text():
-            super().setText(elided)
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        p.setFont(self.font())
+        name = self.objectName()
+        ink = theme.TEXT_DIM if name == "RowSub" else theme.TEXT
+        p.setPen(theme.color(ink))
+        text = self._full
+        if self.width() > 2:
+            # 用字体自己的度量。self.fontMetrics() 会把这个标签变成原生窗口。
+            metrics = QFontMetrics(self.font())
+            text = metrics.elidedText(self._full, Qt.ElideRight, max(10, self.width() - 2))
+        p.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
 
 
 class DeviceIconTile(QWidget):
@@ -637,7 +774,7 @@ class PercentLabel(QWidget):
         p.end()
 
 
-class DeviceRow(QFrame):
+class DeviceRow(QWidget):
     """单个外设一行：图标 + 名称与百分比同线 + 通栏电量条。
 
     行本身不可点击，所以不做任何 hover 反馈 —— 有反馈反而让人以为能点。

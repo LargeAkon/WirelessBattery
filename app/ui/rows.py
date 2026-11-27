@@ -65,6 +65,10 @@ def clear_layout(layout) -> None:
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            # 先藏再摘。行本身没被 hide 过，只是跟着诊断窗口一起不可见。
+            # 直接 setParent(None) 会把它收成带最小化、最大化、关闭的独立窗口，
+            # 闪在屏幕左上角或正中，下一轮事件循环才被删掉。
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
 

@@ -467,9 +467,13 @@ def _dialog_qss() -> str:
     """
 
 
+def menu_qss() -> str:
+    """托盘菜单自己的样式。换肤时只刷菜单，不刷整份应用样式。"""
+    return _menu_qss()
+
+
 def _menu_qss() -> str:
-    """托盘右键菜单。以前单独 setStyleSheet 到菜单对象上，现在并入全局，
-    换肤时随 app.setStyleSheet 一次刷新，不必再手动同步第二份样式。"""
+    """托盘右键菜单。"""
     return f"""
     QMenu {{
         background: {BG_SOFT};

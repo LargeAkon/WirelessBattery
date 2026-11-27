@@ -212,10 +212,19 @@ class DiagWindow(QWidget):
 
     # ---------------- 主题 ----------------
     def apply_theme(self) -> None:
-        """主题切换后整体重刷：图标磁贴是自己画的，只换 qss 不会跟着变色。"""
+        """主题切换后整体重刷。
+
+        窗口已经关掉时不能重建列表。重建会把每一行先摘成独立窗口，
+        屏幕上就是诊断页闪一下又自己关掉。图标磁贴和电量是自己画的，
+        换完样式表再 update 就会跟着变色。
+        """
+        shown = self.isVisible()
         self.setStyleSheet(theme.qss())
-        self._render()
         self.update()
+        for child in self.findChildren(QWidget):
+            child.update()
+        if not shown:
+            self.hide()
 
     # ---------------- 运行 ----------------
     def _start(self) -> None:

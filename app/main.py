@@ -38,14 +38,15 @@ CHARGE_REFRESH_MS = 30_000
 
 
 class ScanWorker(QThread):
+    """全程只留这一条扫描线程，刷新时重新启动，不再每次新建。"""
+
     done = Signal(list, list, str)
 
-    def __init__(self, config: Config, with_debug: bool = False,
-                 force: bool = False, parent=None):
+    def __init__(self, config: Config, parent=None):
         super().__init__(parent)
         self.config = config
-        self.with_debug = with_debug
-        self.force = force
+        self.with_debug = False
+        self.force = False
 
     def run(self) -> None:
         try:
@@ -54,6 +55,10 @@ class ScanWorker(QThread):
             self.done.emit(devices, debug, "")
         except Exception as exc:  # 兜底，避免线程异常吞掉界面更新
             self.done.emit([], [], f"{type(exc).__name__}: {exc}")
+        finally:
+            # 这一轮的设备表、枚举结果在本线程上就地收回。
+            # 放到界面线程会把消息循环停住。
+            gc.collect()
 
 
 class TrayApp:
@@ -107,13 +112,17 @@ class TrayApp:
         self.card.sync_from_config()
 
         self.tray_pulse = QTimer()
-        self.tray_pulse.setInterval(140)   # 14 帧 × 140ms ≈ 2.0s 从空充满一次
+        self.tray_pulse.setInterval(140)   # 每帧 140ms，从空充满大约 2 秒
         self.tray_pulse.timeout.connect(self._next_tray_frame)
 
         # 悬停托盘图标直接弹卡片（原生 tooltip 只有一行字，信息太少）
         self.hover = TrayHover(self.tray, self.card)
         self.hover.supported_changed.connect(self._on_hover_support)
         self.hover.start()
+
+        self._worker = ScanWorker(self.config)
+        self._worker.done.connect(self._on_scan_done)
+        self._worker.finished.connect(self._on_worker_finished)
 
         self.timer = QTimer()
         self.timer.setInterval(self.config.interval_ms)
@@ -220,7 +229,7 @@ class TrayApp:
 
         if dev is not None and dev.charging:
             self._tray_frames = icons.tray_charge_frames(
-                theme.tray_icon_color(), theme.tray_charge_color())
+                theme.tray_icon_color(), theme.tray_charge_color(), dev.level)
             self.tray.setIcon(self._tray_frames[0])
             self.tray_pulse.start()
         else:
@@ -263,26 +272,18 @@ class TrayApp:
 
     # ---------------- 刷新 ----------------
     def refresh(self, manual: bool = False, force: bool | None = None) -> None:
-        if self._scanning:
+        if self._scanning or self._worker.isRunning():
             return
         if force is None:
             force = manual
         if manual:
             self.card.set_loading(True)
-        worker = ScanWorker(self.config, with_debug=False, force=force)
-        worker.done.connect(self._on_scan_done)
-        # 线程真正结束后再释放引用：done 到达时线程可能还没退完，
-        # 这时候换下一位会让 QThread 在运行中被析构（Qt 直接 abort）。
-        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._worker.with_debug = False
+        self._worker.force = force
         self._scanning = True
-        self._worker = worker
-        worker.start()
+        self._worker.start()
 
-    def _on_worker_finished(self, worker) -> None:
-        if worker is not None:
-            worker.deleteLater()
-        if self._worker is worker:
-            self._worker = None
+    def _on_worker_finished(self) -> None:
         # 线程都退完了，这一轮一定结束了。万一 done 没送到（异常路径），
         # 这里兜住：否则 _scanning 永远是 True，之后再也刷不动。
         self._scanning = False
@@ -300,8 +301,6 @@ class TrayApp:
         self._sync_timer_interval()
         if self._diag:
             self._diag.update_devices(self.devices, self.debug_lines)
-        # 刷新刚建出来的枚举表和线程池，用完就还给系统，不留在这一轮里
-        gc.collect()
 
     def _sync_timer_interval(self) -> None:
         """按"是否在充电"决定下一次自动刷新的间隔。"""

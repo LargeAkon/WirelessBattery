@@ -446,10 +446,10 @@ def tray_icon(level: float | None, ink: str) -> QIcon:
 
 # 充电态：QSystemTrayIcon 只吃静态位图，没法真做动画，所以预先渲染若干帧、
 # 由调用方定时轮换。轮换只是换一张画好的图，CPU 几乎为零。
-# 动画语义：内腔里的绿色像电量一样**从左往右涨满**（0 → 100%），涨满停两帧再从头来。
+# 动画语义：内腔里的绿色从**当前电量**往右涨到满，涨满停两帧再从当前电量重来。
 # 不做"一段绿色横向滑动"——那是"液体在流"，看不出充进去了；从左往右填满才读作充电。
 CHARGE_STEPS = 12      # 从空到满的帧数（16px 内腔 11px，正好每帧涨 1 像素）
-CHARGE_HOLD = 2        # 涨满后多停两帧，避免刚满就闪回空
+CHARGE_HOLD = 2        # 涨满后多停两帧，避免刚满就闪回起点
 
 
 def _tray_charge_pixmap(ink: str, charge_ink: str, size: int,
@@ -473,14 +473,31 @@ def _tray_charge_pixmap(ink: str, charge_ink: str, size: int,
 
 
 def tray_charge_frames(ink: str, charge_ink: str,
+                       level: float | None = None,
                        steps: int = CHARGE_STEPS,
                        hold: int = CHARGE_HOLD) -> list[QIcon]:
-    """充电帧：绿色从空涨到满，停留 hold 帧后循环。"""
+    """充电帧：绿色从当前电量涨到满，停留 hold 帧后循环。
+
+    不知道电量时仍从空开始。步数按剩余电量缩短，涨的速度和从空充满一样。
+    """
+    start = 0.0
+    if level is not None:
+        start = max(0.0, min(100.0, float(level))) / 100.0
+    span = 1.0 - start
     steps = max(2, int(steps))
-    total = steps + max(0, int(hold))
-    frames = []
+    # 剩余不到一档就只画满电，避免 99% 也来回抖一像素。
+    move = max(2, int(round(steps * span))) if span > 1.0 / steps else 1
+    total = move + max(0, int(hold))
+    frames: list[QIcon] = []
+    built: dict[float, QIcon] = {}
     for i in range(total):
-        t = min(1.0, i / (steps - 1))
-        frames.append(_build_icon(
-            lambda s, d, k=t: _tray_charge_pixmap(ink, charge_ink, s, d, k)))
+        t = 1.0 if move <= 1 else start + span * min(1.0, i / (move - 1))
+        # 涨满后多停的那几帧和满电那一帧是同一张图，不重复分配。
+        key = round(t, 4)
+        icon = built.get(key)
+        if icon is None:
+            icon = _build_icon(
+                lambda s, d, k=t: _tray_charge_pixmap(ink, charge_ink, s, d, k))
+            built[key] = icon
+        frames.append(icon)
     return frames

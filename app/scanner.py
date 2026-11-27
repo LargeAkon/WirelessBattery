@@ -2,12 +2,11 @@
 """扫描调度与结果合并：多通道 -> 统一设备列表。
 
 通道清单、来源判定、保留时长与合并权重都在 `providers/registry.py`，
-这里只负责并发跑一遍、按优先级去重、维护"读不到时沿用上次读数"的缓存。
+这里只负责按顺序跑一遍、按优先级去重、维护"读不到时沿用上次读数"的缓存。
 """
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from config import Config
 from model import UNKNOWN, Device
@@ -32,22 +31,18 @@ class Scanner:
         debug: list[str] = []
         found: list[Device] = []
 
-        # 通道之间不互相等结果。线程只留 3 条：hidapi 自己有全局锁，
-        # 开得再多也不会真的同时读设备，只会在点刷新时多占一截栈内存。
-        # HID 清单在进线程池之前只枚举一次。
+        # 通道在这一条扫描线程上按顺序读完。hidapi 自己有全局锁，
+        # 再开工人线程也不会同时读到设备，只是多占几块线程栈。
+        # 打字时照样读，不跳过任何通道。HID 清单只枚举一次。
         logs: list[list[str]] = []
-        with hidlist.shared(), ThreadPoolExecutor(max_workers=3) as pool:
-            futures = []
+        with hidlist.shared():
             for channel in registry.CHANNELS:
                 local = [] if with_debug else None
-                futures.append((channel.label, local,
-                                pool.submit(channel.run, local, force)))
-            for label, local, fut in futures:
                 try:
-                    found.extend(fut.result())
+                    found.extend(channel.run(local, force))
                 except Exception as exc:
                     if local is not None:
-                        local.append(f"[{label}] 通道异常: {exc}")
+                        local.append(f"[{channel.label}] 通道异常: {exc}")
                 if local:
                     logs.append(local)
         for local in logs:

@@ -112,7 +112,7 @@ class TrayApp:
         self.card.sync_from_config()
 
         self.tray_pulse = QTimer()
-        self.tray_pulse.setInterval(140)   # 每帧 140ms，从空充满大约 2 秒
+        self.tray_pulse.setInterval(360)   # 每帧 360ms，从空充满大约 4 秒
         self.tray_pulse.timeout.connect(self._next_tray_frame)
 
         # 悬停托盘图标直接弹卡片（原生 tooltip 只有一行字，信息太少）

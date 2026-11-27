@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import io
 import json
 import lzma
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import winreg
 from pathlib import Path
 
@@ -174,6 +176,139 @@ def remove_uninstall_entry() -> None:
         pass
 
 
+_CREATE_NO_WINDOW = 0x08000000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_kernel32.OpenProcess.restype = ctypes.c_void_p
+_kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+_kernel32.CloseHandle.restype = wintypes.BOOL
+_kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, wintypes.UINT]
+_kernel32.TerminateProcess.restype = wintypes.BOOL
+_kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+_kernel32.WaitForSingleObject.restype = wintypes.DWORD
+_kernel32.QueryFullProcessImageNameW.argtypes = [
+    ctypes.c_void_p, wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_wchar), ctypes.POINTER(wintypes.DWORD),
+]
+_kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+
+def _pids_named(image: str) -> list[int]:
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, creationflags=_CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in out.stdout.splitlines():
+        parts = line.strip().split('","')
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip('"')
+        if name.lower() != image.lower():
+            continue
+        try:
+            pids.append(int(parts[1].strip('"')))
+        except ValueError:
+            continue
+    return pids
+
+
+def _image_path(pid: int) -> str:
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def _inside(path: str, root: Path) -> bool:
+    if not path:
+        return False
+    try:
+        child = os.path.normcase(os.path.normpath(str(Path(path).resolve())))
+        base = os.path.normcase(os.path.normpath(str(root.resolve())))
+    except OSError:
+        return False
+    if child == base:
+        return True
+    prefix = base if base.endswith(os.sep) else base + os.sep
+    return child.startswith(prefix)
+
+
+def _terminate(pid: int) -> None:
+    if pid == os.getpid():
+        return
+    handle = _kernel32.OpenProcess(_PROCESS_TERMINATE | _SYNCHRONIZE, False, pid)
+    if not handle:
+        return
+    try:
+        _kernel32.TerminateProcess(handle, 1)
+        _kernel32.WaitForSingleObject(handle, 5000)
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def _wait_writable(path: Path, timeout: float = 4.0) -> bool:
+    """进程退出后，已映射的 pyd 还要过一会儿才允许改写。"""
+    if not path.exists():
+        return True
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(str(path), os.O_RDWR | os.O_BINARY)
+            os.close(fd)
+            return True
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.12)
+        except OSError:
+            return True
+
+
+def running_app_pids(target: Path) -> list[int]:
+    """安装目录里正在运行的主程序。安装包自己不叫这个名字，不会被算进去。"""
+    try:
+        root = target.resolve()
+    except OSError:
+        return []
+    if not root.exists():
+        return []
+    found: list[int] = []
+    for pid in _pids_named(EXE_NAME):
+        if _inside(_image_path(pid), root):
+            found.append(pid)
+    return found
+
+
+def stop_running_app(target: Path) -> bool:
+    """覆盖安装前结束目标目录里的主程序，放开被占用的 _internal 文件。"""
+    pids = running_app_pids(target)
+    if not pids:
+        return False
+    for pid in pids:
+        _terminate(pid)
+    probe = target / "_internal" / "_bz2.pyd"
+    if not probe.exists():
+        probe = target / EXE_NAME
+    _wait_writable(probe)
+    return True
+
+
 def light_title_bar(widget: QWidget) -> None:
     """强制浅色标题栏，避免系统深色模式下窗口边框变黑、和白色主体割裂。"""
     try:
@@ -226,9 +361,25 @@ class InstallWorker(QThread):
         self.start_menu_link = start_menu_link
         self.autostart = autostart
 
+    def _extract_member(self, tf: tarfile.TarFile, member: tarfile.TarInfo) -> None:
+        dest = self.target / member.name
+        last: PermissionError | None = None
+        for _ in range(5):
+            try:
+                tf.extract(member, self.target, filter="data")
+                return
+            except PermissionError as exc:
+                last = exc
+                stop_running_app(self.target)
+                _wait_writable(dest, timeout=1.2)
+        raise PermissionError(f"文件仍被占用，无法覆盖安装：{dest}") from last
+
     def run(self) -> None:
         try:
             self.target.mkdir(parents=True, exist_ok=True)
+            if running_app_pids(self.target):
+                self.progress.emit(3, "关闭正在运行的程序")
+                stop_running_app(self.target)
             # tar.xz 是整体压缩（solid），一次性解开再按成员落盘，比逐文件
             # zip 解压快，也让安装包小了一大截
             self.progress.emit(6, "解压安装文件")
@@ -238,7 +389,7 @@ class InstallWorker(QThread):
                 members = [m for m in tf.getmembers() if m.isfile()]
                 total = len(members) or 1
                 for index, member in enumerate(members, 1):
-                    tf.extract(member, self.target, filter="data")
+                    self._extract_member(tf, member)
                     if index % 12 == 0 or index == total:
                         pct = 30 + int(index / total * 46)
                         self.progress.emit(pct, f"解压文件 {index}/{total}")
